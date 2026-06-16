@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Phoenix Futures Terminal</title>
+  <title>Pro Trading Terminal V4</title>
 
   <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
 
@@ -12,22 +12,43 @@
       color: white;
       font-family: Arial;
       display: flex;
-    }
-
-    #left {
-      width: 320px;
-      background: #111827;
       height: 100vh;
-      overflow: auto;
     }
 
-    #main {
+    /* LEFT PANEL */
+    #left {
+      width: 340px;
+      background: #111827;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    /* DASHBOARD */
+    #dashboard {
+      padding: 12px;
+      border-bottom: 1px solid #222;
+      background: #0f172a;
+    }
+
+    .status {
+      font-size: 14px;
+      margin-top: 5px;
+    }
+
+    .ok { color: #00ff88; }
+    .bad { color: #ff4d4d; }
+    .wait { color: #facc15; }
+
+    /* HOT TOKENS */
+    #hot {
+      overflow-y: auto;
       flex: 1;
     }
 
     .token {
       padding: 10px;
-      border-bottom: 1px solid #222;
+      border-bottom: 1px solid #1f2937;
       cursor: pointer;
     }
 
@@ -35,40 +56,62 @@
       background: #1f2937;
     }
 
-    #chart {
-      height: 100vh;
+    /* MAIN CHART */
+    #main {
+      flex: 1;
     }
+
+    #chart {
+      height: 100%;
+    }
+
   </style>
 </head>
 
 <body>
 
+<!-- LEFT PANEL -->
 <div id="left">
-  <h3>🔥 HOT</h3>
+
+  <div id="dashboard">
+    <div>📊 PRO TERMINAL V4</div>
+
+    <div id="status" class="status wait">🟡 CONNECTING...</div>
+    <div id="price" class="status">💰 PRICE: --</div>
+    <div id="update" class="status">⏱ LAST UPDATE: --</div>
+  </div>
+
   <div id="hot"></div>
+
 </div>
 
+<!-- MAIN -->
 <div id="main">
   <div id="chart"></div>
 </div>
 
 <script>
 
+let ws;
 let selected = "BTCUSDT";
 
-const chart = LightweightCharts.createChart(document.getElementById('chart'), {
-    layout: { background: { color: '#0b0f14' }, textColor: 'white' }
+// CHART
+const chart = LightweightCharts.createChart(document.getElementById("chart"), {
+    layout: { background: { color: "#0b0f14" }, textColor: "white" }
 });
 
 const series = chart.addLineSeries();
 
-let ws;
-
+// CONNECT
 function connect() {
 
     ws = new WebSocket("wss://live-price-chart-backend.onrender.com/ws");
 
+    setStatus("🟡 CONNECTING...", "wait");
+
     ws.onopen = () => {
+        setStatus("🟢 LIVE CONNECTED", "ok");
+
         ws.send(JSON.stringify({
             type: "subscribe",
             symbol: selected
@@ -76,47 +119,80 @@ function connect() {
     };
 
     ws.onmessage = (msg) => {
+
         const res = JSON.parse(msg.data);
 
+        // PRICE UPDATE
+        if (res.type === "symbol") {
+
+            const price = res.data.price;
+
+            document.getElementById("price").innerText =
+                `💰 PRICE: ${res.data.symbol} $${price}`;
+
+            document.getElementById("update").innerText =
+                `⏱ ${new Date().toLocaleTimeString()}`;
+
+            series.update({
+                time: Math.floor(Date.now() / 1000),
+                value: price
+            });
+        }
+
+        // HOT TOKENS
         if (res.type === "hot") {
             renderHot(res.data);
         }
-
-        if (res.type === "symbol") {
-            series.update({
-                time: Math.floor(Date.now() / 1000),
-                value: res.data.price
-            });
-        }
     };
 
-    ws.onclose = () => setTimeout(connect, 2000);
+    ws.onclose = () => {
+        setStatus("🔴 DISCONNECTED (reconnecting...)", "bad");
+        setTimeout(connect, 2000);
+    };
+
+    ws.onerror = () => {
+        setStatus("❌ ERROR", "bad");
+    };
 }
 
-function subscribe(symbol) {
-    selected = symbol;
-
-    ws.send(JSON.stringify({
-        type: "subscribe",
-        symbol
-    }));
+// STATUS UI
+function setStatus(text, type) {
+    const el = document.getElementById("status");
+    el.innerText = text;
+    el.className = "status " + type;
 }
 
+// HOT TOKENS
 function renderHot(data) {
+
     const hot = document.getElementById("hot");
     hot.innerHTML = "";
 
     data.forEach(t => {
+
         const div = document.createElement("div");
         div.className = "token";
-        div.innerHTML = `${t.symbol} $${t.price}`;
 
-        div.onclick = () => subscribe(t.symbol);
+        div.innerHTML = `
+            <div>${t.symbol}</div>
+            <div style="color:#aaa">$${t.price}</div>
+        `;
+
+        div.onclick = () => {
+
+            selected = t.symbol;
+
+            ws.send(JSON.stringify({
+                type: "subscribe",
+                symbol: selected
+            }));
+        };
 
         hot.appendChild(div);
     });
 }
 
+// START
 connect();
 
 </script>
