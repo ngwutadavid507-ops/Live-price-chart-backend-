@@ -1,5 +1,6 @@
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
+import aiohttp
 import asyncio
 import time
 
@@ -13,37 +14,58 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.get("/")
-def home():
-    return {"status": "running"}
+BINANCE_URL = "https://fapi.binance.com/fapi/v1/ticker/24hr"
 
-@app.get("/health")
-def health():
-    return {
-        "status": "ok",
-        "ws_route": "/ws"
-    }
 
+# -------------------------
+# REST: SYMBOL LIST
+# -------------------------
 @app.get("/symbols")
-def symbols():
+async def symbols():
+    async with aiohttp.ClientSession() as session:
+        async with session.get(BINANCE_URL) as r:
+            data = await r.json()
+
     return [
-        {"symbol": "BTCUSDT", "price": 65000},
-        {"symbol": "ETHUSDT", "price": 3500}
+        {
+            "symbol": x["symbol"],
+            "price": float(x["lastPrice"]),
+            "change": float(x["priceChangePercent"]),
+            "volume": float(x["volume"])
+        }
+        for x in data
     ]
 
+
+# -------------------------
+# WEBSOCKET: LIVE STREAM
+# -------------------------
 @app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket):
+async def ws_endpoint(ws: WebSocket):
     await ws.accept()
 
-    try:
-        while True:
-            await ws.send_json({
-                "type": "ping",
-                "message": "connected",
-                "time": time.time()
-            })
+    while True:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(BINANCE_URL) as r:
+                data = await r.json()
 
-            await asyncio.sleep(1)
+        top = sorted(
+            data,
+            key=lambda x: float(x["priceChangePercent"]),
+            reverse=True
+        )[:20]
 
-    except Exception as e:
-        print("WebSocket error:", e)
+        await ws.send_json({
+            "type": "hot",
+            "data": [
+                {
+                    "symbol": x["symbol"],
+                    "price": float(x["lastPrice"]),
+                    "change": float(x["priceChangePercent"])
+                }
+                for x in top
+            ],
+            "time": time.time()
+        })
+
+        await asyncio.sleep(2)
