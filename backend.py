@@ -44,3 +44,20 @@ async def websocket_endpoint(ws: WebSocket):
         })
 
         await asyncio.sleep(1)
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket):
+    await ws.accept()
+
+    while True:
+        await ws.send_json({
+            "status": "connected"
+        })
+
+        await asyncio.sleep(1)
+
+  @app.get("/health")
+def health():
+    return {
+        "ws_route": "/ws",
+        "status": "ok"
+    }      
