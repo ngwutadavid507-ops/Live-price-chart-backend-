@@ -1,16 +1,15 @@
 import asyncio
 import json
 import time
-import aiohttp
-import websockets
 from fastapi import FastAPI, WebSocket
 from fastapi.responses import FileResponse
 import os
+import websockets
 
 app = FastAPI()
 
 # =========================
-# MARKET STATE
+# GLOBAL STATE
 # =========================
 
 prices = {}
@@ -20,10 +19,10 @@ clients = set()
 subscriptions = {}
 
 # =========================
-# BINANCE STREAM
+# BINANCE STREAM (ALL FUTURES)
 # =========================
 
-async def binance_ws():
+async def binance_stream():
     url = "wss://fstream.binance.com/ws/!ticker@arr"
 
     async with websockets.connect(url) as ws:
@@ -39,18 +38,19 @@ async def binance_ws():
                         "price": float(item["c"]),
                         "change": float(item["P"]),
                         "volume": float(item["v"]),
-                        "time": time.time(),
-                        "exchange": "binance"
+                        "exchange": "binance",
+                        "time": time.time()
                     }
 
-            except:
+            except Exception as e:
+                print("Binance error:", e)
                 await asyncio.sleep(2)
 
 # =========================
-# BYBIT STREAM
+# BYBIT STREAM (LINEAR)
 # =========================
 
-async def bybit_ws():
+async def bybit_stream():
     url = "wss://stream.bybit.com/v5/public/linear"
 
     async with websockets.connect(url) as ws:
@@ -72,11 +72,12 @@ async def bybit_ws():
                             "price": float(item["lastPrice"]),
                             "change": float(item["price24hPcnt"]) * 100,
                             "volume": float(item["volume24h"]),
-                            "time": time.time(),
-                            "exchange": "bybit"
+                            "exchange": "bybit",
+                            "time": time.time()
                         }
 
-            except:
+            except Exception as e:
+                print("Bybit error:", e)
                 await asyncio.sleep(2)
 
 # =========================
@@ -96,7 +97,7 @@ async def hot_engine():
         )[:10]
 
 # =========================
-# BROADCASTER
+# BROADCAST ENGINE
 # =========================
 
 async def broadcaster():
@@ -128,7 +129,7 @@ async def broadcaster():
             subscriptions.pop(d, None)
 
 # =========================
-# FRONTEND ROUTE (FIXED)
+# FRONTEND ROUTE
 # =========================
 
 @app.get("/")
@@ -137,11 +138,11 @@ def home():
     return FileResponse(path)
 
 # =========================
-# WEBSOCKET
+# WEBSOCKET API
 # =========================
 
 @app.websocket("/ws")
-async def ws_endpoint(ws: WebSocket):
+async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
     clients.add(ws)
     subscriptions[ws] = None
@@ -164,12 +165,12 @@ async def ws_endpoint(ws: WebSocket):
         subscriptions.pop(ws, None)
 
 # =========================
-# STARTUP
+# STARTUP TASKS
 # =========================
 
 @app.on_event("startup")
 async def startup():
-    asyncio.create_task(binance_ws())
-    asyncio.create_task(bybit_ws())
+    asyncio.create_task(binance_stream())
+    asyncio.create_task(bybit_stream())
     asyncio.create_task(hot_engine())
     asyncio.create_task(broadcaster())
