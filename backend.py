@@ -1,15 +1,9 @@
-import asyncio
-import json
-import time
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import aiohttp
 
 app = FastAPI()
 
-# -----------------------------
-# CORS (ALLOW FRONTEND)
-# -----------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,71 +12,31 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -----------------------------
-# STATE
-# -----------------------------
-clients = set()
+@app.get("/")
+def root():
+    return {
+        "status": "running",
+        "version": "debug-v1"
+    }
 
-# -----------------------------
-# BINANCE REST FETCH (STABLE)
-# -----------------------------
-BINANCE_URL = "https://fapi.binance.com/fapi/v1/ticker/24hr"
-
-async def fetch_binance():
-    async with aiohttp.ClientSession() as session:
-        async with session.get(BINANCE_URL) as resp:
-            return await resp.json()
-
-def format_data(raw):
-    return [
-        {
-            "symbol": item["symbol"],
-            "price": float(item["lastPrice"]),
-            "change": float(item["priceChangePercent"]),
-            "volume": float(item["volume"]),
-            "exchange": "binance",
-            "time": time.time()
-        }
-        for item in raw[:150]
-    ]
-
-# -----------------------------
-# WEBSOCKET ENDPOINT
-# -----------------------------
-@app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket):
-    await ws.accept()
-    clients.add(ws)
-
-    try:
-        while True:
-            try:
-                raw = await fetch_binance()
-                data = format_data(raw)
-
-                await ws.send_json({
-                    "type": "prices",
-                    "data": data
-                })
-
-            except Exception as e:
-                await ws.send_json({
-                    "type": "error",
-                    "message": str(e)
-                })
-
-            await asyncio.sleep(2)
-
-    except WebSocketDisconnect:
-        clients.discard(ws)
-
-# -----------------------------
-# SYMBOLS ENDPOINT (WORKING NOW)
-# -----------------------------
 @app.get("/symbols")
 async def symbols():
+    url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
+
     try:
-        raw = await fetch_binance()
-        return [item["symbol"] for item in raw[:200]]
-    except:
-        return []
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=20) as resp:
+
+                text = await resp.text()
+
+                return {
+                    "success": True,
+                    "http_status": resp.status,
+                    "sample": text[:500]
+                }
+
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e)
+                }
