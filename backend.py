@@ -1,6 +1,7 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-import aiohttp
+import asyncio
+import time
 
 app = FastAPI()
 
@@ -13,30 +14,33 @@ app.add_middleware(
 )
 
 @app.get("/")
-def root():
-    return {
-        "status": "running",
-        "version": "debug-v1"
-    }
+def home():
+    return {"status": "running"}
 
 @app.get("/symbols")
-async def symbols():
-    url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
+def symbols():
+    return [
+        {"symbol": "BTCUSDT", "price": 65000},
+        {"symbol": "ETHUSDT", "price": 3500},
+    ]
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=20) as resp:
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket):
+    await ws.accept()
 
-                text = await resp.text()
-
-                return {
-                    "success": True,
-                    "http_status": resp.status,
-                    "sample": text[:500]
+    while True:
+        await ws.send_json({
+            "type": "prices",
+            "data": [
+                {
+                    "symbol": "BTCUSDT",
+                    "price": 65000 + int(time.time()) % 10
+                },
+                {
+                    "symbol": "ETHUSDT",
+                    "price": 3500 + int(time.time()) % 5
                 }
+            ]
+        })
 
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e)
-                }
+        await asyncio.sleep(1)
