@@ -4,139 +4,104 @@ import time
 import aiohttp
 import websockets
 from fastapi import FastAPI, WebSocket
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse
+import os
 
 app = FastAPI()
 
 # =========================
-# CORE STATE ENGINE
+# MARKET STATE
 # =========================
 
 prices = {}
-candles = {}
-orderbook = {}
-trades = {}
-funding = {}
-liquidations = {}
+hot_tokens = []
 
 clients = set()
 subscriptions = {}
 
 # =========================
-# BINANCE PRICE + CANDLES + TRADES
+# BINANCE STREAM
 # =========================
 
-async def binance_stream():
-    url = "wss://fstream.binance.com/ws/!miniTicker@arr"
+async def binance_ws():
+    url = "wss://fstream.binance.com/ws/!ticker@arr"
 
     async with websockets.connect(url) as ws:
         while True:
-            data = json.loads(await ws.recv())
+            try:
+                msg = json.loads(await ws.recv())
 
-            for item in data:
-                symbol = item["s"]
+                for item in msg:
+                    symbol = item["s"]
 
-                prices[symbol] = {
-                    "price": float(item["c"]),
-                    "volume": float(item["v"]),
-                    "time": time.time(),
-                    "exchange": "binance"
-                }
+                    prices[symbol] = {
+                        "symbol": symbol,
+                        "price": float(item["c"]),
+                        "change": float(item["P"]),
+                        "volume": float(item["v"]),
+                        "time": time.time(),
+                        "exchange": "binance"
+                    }
+
+            except:
+                await asyncio.sleep(2)
 
 # =========================
-# BYBIT STREAM (PRICE + FUNDING)
+# BYBIT STREAM
 # =========================
 
-async def bybit_stream():
+async def bybit_ws():
     url = "wss://stream.bybit.com/v5/public/linear"
 
     async with websockets.connect(url) as ws:
-
         await ws.send(json.dumps({
             "op": "subscribe",
-            "args": ["tickers.*", "orderbook.50.*", "publicTrade.*"]
+            "args": ["tickers.*"]
         }))
 
         while True:
-            msg = json.loads(await ws.recv())
+            try:
+                msg = json.loads(await ws.recv())
 
-            if "data" in msg:
-                topic = msg.get("topic", "")
+                if "data" in msg:
+                    for item in msg["data"]:
+                        symbol = item["symbol"]
 
-                for item in msg["data"]:
-
-                    symbol = item.get("symbol")
-
-                    # PRICE
-                    if "tickers" in topic:
                         prices[symbol] = {
+                            "symbol": symbol,
                             "price": float(item["lastPrice"]),
+                            "change": float(item["price24hPcnt"]) * 100,
                             "volume": float(item["volume24h"]),
-                            "funding": float(item.get("fundingRate", 0)),
                             "time": time.time(),
                             "exchange": "bybit"
                         }
 
-                    # ORDERBOOK
-                    elif "orderbook" in topic:
-                        orderbook[symbol] = item
-
-                    # TRADES
-                    elif "publicTrade" in topic:
-                        trades.setdefault(symbol, []).append({
-                            "price": item["price"],
-                            "size": item["size"],
-                            "side": item["side"],
-                            "time": item["time"]
-                        })
+            except:
+                await asyncio.sleep(2)
 
 # =========================
-# CANDLE ENGINE (1m / 5m / 1h)
+# HOT TOKENS ENGINE
 # =========================
 
-def update_candle(symbol, price, tf="1m"):
-    bucket = int(time.time() // 60)
+async def hot_engine():
+    global hot_tokens
 
-    key = f"{symbol}_{tf}_{bucket}"
-
-    if key not in candles:
-        candles[key] = {
-            "open": price,
-            "high": price,
-            "low": price,
-            "close": price,
-            "time": bucket
-        }
-
-    c = candles[key]
-    c["high"] = max(c["high"], price)
-    c["low"] = min(c["low"], price)
-    c["close"] = price
-
-# =========================
-# LIQUIDATION SIMULATOR (API-BASED EXTENSION SLOT)
-# =========================
-
-async def liquidation_engine():
     while True:
         await asyncio.sleep(3)
 
-        # placeholder for real liquidation feeds (Bybit/Binance futures liquidation stream)
-        for symbol, p in prices.items():
-            if float(p["price"]) % 100 == 0:
-                liquidations.setdefault(symbol, []).append({
-                    "price": p["price"],
-                    "size": 1000,
-                    "time": time.time()
-                })
+        hot_tokens = sorted(
+            prices.values(),
+            key=lambda x: x.get("volume", 0),
+            reverse=True
+        )[:10]
 
 # =========================
-# BROADCAST ENGINE (LOW LATENCY)
+# BROADCASTER
 # =========================
 
 async def broadcaster():
     while True:
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(1)
 
         dead = []
 
@@ -145,25 +110,14 @@ async def broadcaster():
                 symbol = subscriptions.get(ws)
 
                 if symbol and symbol in prices:
-
                     await ws.send_json({
                         "type": "symbol",
-                        "data": {
-                            "price": prices[symbol],
-                            "orderbook": orderbook.get(symbol),
-                            "trades": trades.get(symbol, [])[-20:],
-                            "funding": prices[symbol].get("funding", 0),
-                            "liquidations": liquidations.get(symbol, [])
-                        }
+                        "data": prices[symbol]
                     })
                 else:
                     await ws.send_json({
                         "type": "hot",
-                        "data": sorted(
-                            prices.values(),
-                            key=lambda x: x.get("volume", 0),
-                            reverse=True
-                        )[:10]
+                        "data": hot_tokens
                     })
 
             except:
@@ -174,15 +128,20 @@ async def broadcaster():
             subscriptions.pop(d, None)
 
 # =========================
-# API + WS
+# FRONTEND ROUTE (FIXED)
 # =========================
 
 @app.get("/")
 def home():
-    return HTMLResponse(open("index.html").read())
+    path = os.path.join(os.path.dirname(__file__), "index.html")
+    return FileResponse(path)
+
+# =========================
+# WEBSOCKET
+# =========================
 
 @app.websocket("/ws")
-async def ws(ws: WebSocket):
+async def ws_endpoint(ws: WebSocket):
     await ws.accept()
     clients.add(ws)
     subscriptions[ws] = None
@@ -190,10 +149,15 @@ async def ws(ws: WebSocket):
     try:
         while True:
             msg = await ws.receive_text()
-            data = json.loads(msg)
 
-            if data["type"] == "subscribe":
-                subscriptions[ws] = data["symbol"]
+            try:
+                data = json.loads(msg)
+
+                if data.get("type") == "subscribe":
+                    subscriptions[ws] = data["symbol"]
+
+            except:
+                pass
 
     except:
         clients.discard(ws)
@@ -204,8 +168,8 @@ async def ws(ws: WebSocket):
 # =========================
 
 @app.on_event("startup")
-async def start():
-    asyncio.create_task(binance_stream())
-    asyncio.create_task(bybit_stream())
-    asyncio.create_task(liquidation_engine())
+async def startup():
+    asyncio.create_task(binance_ws())
+    asyncio.create_task(bybit_ws())
+    asyncio.create_task(hot_engine())
     asyncio.create_task(broadcaster())
