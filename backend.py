@@ -35,19 +35,15 @@ def symbols():
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
 
-    while True:
-        await ws.send_json({
-            "type": "prices",
-            "data": [
-                {
-                    "symbol": "BTCUSDT",
-                    "price": 65000 + (int(time.time()) % 10)
-                },
-                {
-                    "symbol": "ETHUSDT",
-                    "price": 3500 + (int(time.time()) % 5)
-                }
-            ]
-        })
+    try:
+        while True:
+            await ws.send_json({
+                "type": "ping",
+                "message": "connected",
+                "time": time.time()
+            })
 
-        await asyncio.sleep(1)
+            await asyncio.sleep(1)
+
+    except Exception as e:
+        print("WebSocket error:", e)
