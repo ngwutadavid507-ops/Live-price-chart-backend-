@@ -1,9 +1,9 @@
 import asyncio
 import json
 import time
-import websockets
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+import websockets
 
 app = FastAPI()
 
@@ -15,95 +15,85 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -----------------------
-# STATE
-# -----------------------
-prices = {}
+# -----------------------------
+# GLOBAL STATE
+# -----------------------------
 clients = set()
+latest_data = {}  # symbol -> data
 
-# -----------------------
+# -----------------------------
+# HELPERS
+# -----------------------------
+def to_list():
+    return list(latest_data.values())
+
+# -----------------------------
 # BINANCE STREAM
-# -----------------------
-async def binance():
+# -----------------------------
+async def binance_stream():
     url = "wss://fstream.binance.com/ws/!ticker@arr"
 
-    async with websockets.connect(url) as ws:
-        while True:
-            data = json.loads(await ws.recv())
+    while True:
+        try:
+            async with websockets.connect(url, ping_interval=20) as ws:
+                async for msg in ws:
+                    data = json.loads(msg)
 
-            for t in data:
-                symbol = t["s"]
+                    for t in data:
+                        symbol = t["s"]
 
-                prices[symbol] = {
-                    "symbol": symbol,
-                    "price": float(t["c"]),
-                    "change": float(t["P"]),
-                    "volume": float(t["v"]),
-                    "exchange": "binance",
-                    "time": time.time()
-                }
+                        latest_data[symbol] = {
+                            "symbol": symbol,
+                            "price": float(t["c"]),
+                            "change": float(t["P"]),
+                            "volume": float(t["v"]),
+                            "exchange": "binance",
+                            "time": time.time()
+                        }
 
-# -----------------------
+        except Exception:
+            await asyncio.sleep(3)
+
+# -----------------------------
 # BYBIT STREAM
-# -----------------------
-async def bybit():
+# -----------------------------
+async def bybit_stream():
     url = "wss://stream.bybit.com/v5/public/linear"
 
-    async with websockets.connect(url) as ws:
-        await ws.send(json.dumps({
-            "op": "subscribe",
-            "args": ["tickers.*"]
-        }))
-
-        while True:
-            msg = json.loads(await ws.recv())
-
-            if "data" in msg:
-                for t in msg["data"]:
-                    symbol = t["symbol"]
-
-                    prices[symbol] = {
-                        "symbol": symbol,
-                        "price": float(t["lastPrice"]),
-                        "change": float(t["price24hPcnt"]) * 100,
-                        "volume": float(t["volume24h"]),
-                        "exchange": "bybit",
-                        "time": time.time()
-                    }
-
-# -----------------------
-# BROADCAST LOOP
-# -----------------------
-async def broadcast():
     while True:
-        await asyncio.sleep(1)
+        try:
+            async with websockets.connect(url, ping_interval=20) as ws:
 
-        dead = []
+                await ws.send(json.dumps({
+                    "op": "subscribe",
+                    "args": ["tickers.*"]
+                }))
 
-        for ws in list(clients):
-            try:
-                await ws.send_json({
-                    "type": "prices",
-                    "data": list(prices.values())
-                })
-            except:
-                dead.append(ws)
+                async for msg in ws:
+                    data = json.loads(msg)
 
-        for d in dead:
-            clients.discard(d)
+                    if "data" in data:
+                        for t in data["data"]:
+                            symbol = t.get("symbol")
 
-# -----------------------
-# STARTUP
-# -----------------------
-@app.on_event("startup")
-async def start():
-    asyncio.create_task(binance())
-    asyncio.create_task(bybit())
-    asyncio.create_task(broadcast())
+                            if not symbol:
+                                continue
 
-# -----------------------
-# WEBSOCKET
-# -----------------------
+                            latest_data[symbol] = {
+                                "symbol": symbol,
+                                "price": float(t.get("lastPrice", 0)),
+                                "change": float(t.get("price24hPcnt", 0)) * 100,
+                                "volume": float(t.get("volume24h", 0)),
+                                "exchange": "bybit",
+                                "time": time.time()
+                            }
+
+        except Exception:
+            await asyncio.sleep(3)
+
+# -----------------------------
+# WEBSOCKET CLIENT MANAGER
+# -----------------------------
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
@@ -111,6 +101,29 @@ async def ws_endpoint(ws: WebSocket):
 
     try:
         while True:
-            await ws.receive_text()
-    except:
+            await ws.send_json({
+                "type": "prices",
+                "data": to_list()
+            })
+            await asyncio.sleep(1)
+
+    except WebSocketDisconnect:
         clients.discard(ws)
+
+    except Exception:
+        clients.discard(ws)
+
+# -----------------------------
+# SYMBOLS ENDPOINT (OPTIONAL)
+# -----------------------------
+@app.get("/symbols")
+def symbols():
+    return list(latest_data.keys())
+
+# -----------------------------
+# STARTUP TASKS
+# -----------------------------
+@app.on_event("startup")
+async def startup():
+    asyncio.create_task(binance_stream())
+    asyncio.create_task(bybit_stream())
