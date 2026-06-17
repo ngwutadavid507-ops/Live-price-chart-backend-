@@ -14,8 +14,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-BINANCE_URL = "https://fapi.binance.com/fapi/v1/ticker/24hr"
-
+BYBIT_URL = "https://api.bybit.com/v5/market/tickers?category=linear"
 
 @app.get("/")
 async def root():
@@ -118,3 +117,8 @@ async def ws_endpoint(ws: WebSocket):
             })
 
         await asyncio.sleep(2)
+@app.get("/test")
+async def test():
+    async with aiohttp.ClientSession() as session:
+        async with session.get(BYBIT_URL) as r:
+            return await r.json()
