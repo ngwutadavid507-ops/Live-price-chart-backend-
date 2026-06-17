@@ -20,10 +20,11 @@ CMC_URL = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
 
 
 # -------------------------
-# SAFE HTTP CLIENT (NO GLOBAL RISK)
+# DEBUG SAFE FETCHER
 # -------------------------
-async def fetch_cmc(limit=50):
+async def fetch_cmc(limit=100):
     if not CMC_API_KEY:
+        print("CMC ERROR: Missing API key")
         return []
 
     headers = {"X-CMC_PRO_API_KEY": CMC_API_KEY}
@@ -31,18 +32,23 @@ async def fetch_cmc(limit=50):
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(CMC_URL, headers=headers, params=params, timeout=10) as r:
+            async with session.get(CMC_URL, headers=headers, params=params, timeout=15) as r:
                 data = await r.json()
 
-        return data.get("data", [])
+        # 🔥 IMPORTANT DEBUG CHECK
+        if "data" not in data:
+            print("CMC RESPONSE ERROR:", data)
+            return []
+
+        return data["data"]
 
     except Exception as e:
-        print("CMC ERROR:", e)
+        print("CMC EXCEPTION:", e)
         return []
 
 
 # -------------------------
-# HEALTH
+# ROOT
 # -------------------------
 @app.get("/")
 async def home():
@@ -51,15 +57,19 @@ async def home():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "ws": "/ws"}
+    return {
+        "status": "ok",
+        "ws": "/ws",
+        "cmc_key_loaded": bool(CMC_API_KEY)
+    }
 
 
 # -------------------------
-# SYMBOLS (CLEAN OUTPUT)
+# SYMBOLS (FULL MARKET SNAPSHOT)
 # -------------------------
 @app.get("/symbols")
 async def symbols():
-    data = await fetch_cmc(100)
+    data = await fetch_cmc(5000)  # 🔥 max safe attempt
 
     results = []
 
@@ -67,7 +77,7 @@ async def symbols():
         quote = x.get("quote", {}).get("USD", {})
 
         results.append({
-            "symbol": x.get("symbol"),   # FIXED (no fake USDT)
+            "symbol": x.get("symbol"),
             "name": x.get("name"),
             "price": quote.get("price", 0),
             "change": quote.get("percent_change_24h", 0),
@@ -78,7 +88,7 @@ async def symbols():
 
 
 # -------------------------
-# SINGLE GLOBAL STREAM (IMPORTANT FIX)
+# WEB SOCKET (TOP MOVERS ONLY)
 # -------------------------
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
@@ -86,7 +96,7 @@ async def ws_endpoint(ws: WebSocket):
 
     try:
         while True:
-            data = await fetch_cmc(20)
+            data = await fetch_cmc(100)
 
             top = []
             for x in data:
