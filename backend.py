@@ -22,19 +22,30 @@ BINANCE_URL = "https://fapi.binance.com/fapi/v1/ticker/24hr"
 # -------------------------
 @app.get("/symbols")
 async def symbols():
-    async with aiohttp.ClientSession() as session:
-        async with session.get(BINANCE_URL) as r:
-            data = await r.json()
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://fapi.binance.com/fapi/v1/ticker/24hr",
+                timeout=10
+            ) as r:
 
-    return [
-        {
-            "symbol": x["symbol"],
-            "price": float(x["lastPrice"]),
-            "change": float(x["priceChangePercent"]),
-            "volume": float(x["volume"])
+                data = await r.json()
+
+                return [
+                    {
+                        "symbol": item["symbol"],
+                        "price": float(item["lastPrice"]),
+                        "change": float(item["priceChangePercent"]),
+                        "volume": float(item["volume"])
+                    }
+                    for item in data
+                    if item["symbol"].endswith("USDT")
+                ]
+
+    except Exception as e:
+        return {
+            "error": str(e)
         }
-        for x in data
-    ]
 
 
 # -------------------------
