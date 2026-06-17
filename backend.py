@@ -119,6 +119,22 @@ async def ws_endpoint(ws: WebSocket):
         await asyncio.sleep(2)
 @app.get("/test")
 async def test():
-    async with aiohttp.ClientSession() as session:
-        async with session.get(BYBIT_URL) as r:
-            return await r.json()
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://api.bybit.com/v5/market/tickers?category=linear",
+                timeout=15
+            ) as r:
+
+                text = await r.text()
+
+                return {
+                    "status_code": r.status,
+                    "preview": text[:1000]
+                }
+
+    except Exception as e:
+        return {
+            "error": str(e),
+            "type": str(type(e))
+        }
