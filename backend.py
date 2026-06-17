@@ -2,10 +2,9 @@ from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 import aiohttp
 import asyncio
-import os
 import time
 
-app = FastAPI()  # MUST be above ALL routes
+app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
@@ -14,28 +13,55 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+BINANCE_URL = "https://fapi.binance.com/fapi/v1/ticker/24hr"
+
+
+@app.get("/")
+async def home():
+    return {"status": "running"}
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "ws_route": "/ws"}
+
+
+# -------------------------
+# SYMBOLS (REST API)
+# -------------------------
+@app.get("/symbols")
+async def symbols():
+    async with aiohttp.ClientSession() as session:
+        async with session.get(BINANCE_URL) as r:
+            data = await r.json()
+
+    return [
+        {
+            "symbol": x["symbol"],
+            "price": float(x["lastPrice"]),
+            "change": float(x["priceChangePercent"]),
+            "volume": float(x["quoteVolume"])
+        }
+        for x in data
+    ]
+
+
+# -------------------------
+# WEBSOCKET
+# -------------------------
 @app.websocket("/ws")
-async def ws_endpoint(ws: WebSocket):
+async def ws(ws: WebSocket):
     await ws.accept()
-
-    CMC_API_KEY = os.getenv("CMC_API_KEY")
-
-    url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
-
-    headers = {
-        "X-CMC_PRO_API_KEY": CMC_API_KEY
-    }
 
     while True:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, params={"limit": 50, "convert": "USD"}) as r:
+            async with session.get(BINANCE_URL) as r:
                 data = await r.json()
 
-        coins = data.get("data", [])
-
         top = sorted(
-            coins,
-            key=lambda x: x["quote"]["USD"]["percent_change_24h"],
+            data,
+            key=lambda x: float(x["priceChangePercent"]),
             reverse=True
         )[:20]
 
@@ -43,12 +69,11 @@ async def ws_endpoint(ws: WebSocket):
             "type": "hot",
             "data": [
                 {
-                    "symbol": c["symbol"] + "USDT",
-                    "price": c["quote"]["USD"]["price"],
-                    "change": c["quote"]["USD"]["percent_change_24h"],
-                    "volume": c["quote"]["USD"]["volume_24h"]
+                    "symbol": x["symbol"],
+                    "price": float(x["lastPrice"]),
+                    "change": float(x["priceChangePercent"])
                 }
-                for c in top
+                for x in top
             ],
             "time": time.time()
         })
