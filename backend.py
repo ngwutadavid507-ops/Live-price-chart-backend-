@@ -1,140 +1,29 @@
-from fastapi import FastAPI, WebSocket
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI
 import aiohttp
-import asyncio
-import time
+import os
 
 app = FastAPI()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+CMC_API_KEY = os.getenv("CMC_API_KEY")  # set this on Render
 
-BYBIT_URL = "https://api.bybit.com/v5/market/tickers?category=linear"
+@app.get("/cmc-test")
+async def cmc_test():
+    url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
 
-@app.get("/")
-async def root():
-    return {"status": "running"}
+    headers = {
+        "X-CMC_PRO_API_KEY": CMC_API_KEY
+    }
 
+    params = {
+        "limit": 10,
+        "convert": "USD"
+    }
 
-@app.get("/health")
-async def health():
-    return {"status": "ok", "ws_route": "/ws"}
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers, params=params) as r:
+            data = await r.text()
 
-
-@app.get("/symbols")
-async def symbols():
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(BINANCE_URL, timeout=15) as r:
-
-                if r.status != 200:
-                    return {
-                        "error": f"Binance returned {r.status}"
-                    }
-
-                data = await r.json()
-
-                if not isinstance(data, list):
-                    return {
-                        "error": "Unexpected Binance response",
-                        "response": data
-                    }
-
-                return [
-                    {
-                        "symbol": x["symbol"],
-                        "price": float(x["lastPrice"]),
-                        "change": float(x["priceChangePercent"]),
-                        "volume": float(x["volume"])
-                    }
-                    for x in data
-                    if x["symbol"].endswith("USDT")
-                ]
-
-    except Exception as e:
-        return {"error": str(e)}
-
-
-@app.websocket("/ws")
-async def ws_endpoint(ws: WebSocket):
-
-    await ws.accept()
-
-    while True:
-
-        try:
-
-            async with aiohttp.ClientSession() as session:
-                async with session.get(BINANCE_URL, timeout=15) as r:
-
-                    if r.status != 200:
-                        await ws.send_json({
-                            "type": "error",
-                            "message": f"Binance returned {r.status}"
-                        })
-                        await asyncio.sleep(5)
-                        continue
-
-                    data = await r.json()
-
-            if not isinstance(data, list):
-                await ws.send_json({
-                    "type": "error",
-                    "message": "Invalid Binance response"
-                })
-                await asyncio.sleep(5)
-                continue
-
-            top = sorted(
-                data,
-                key=lambda x: float(x["priceChangePercent"]),
-                reverse=True
-            )[:20]
-
-            await ws.send_json({
-                "type": "hot",
-                "data": [
-                    {
-                        "symbol": x["symbol"],
-                        "price": float(x["lastPrice"]),
-                        "change": float(x["priceChangePercent"])
-                    }
-                    for x in top
-                ],
-                "time": time.time()
-            })
-
-        except Exception as e:
-
-            await ws.send_json({
-                "type": "error",
-                "message": str(e)
-            })
-
-        await asyncio.sleep(2)
-@app.get("/test")
-async def test():
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                "https://api.bybit.com/v5/market/tickers?category=linear",
-                timeout=15
-            ) as r:
-
-                text = await r.text()
-
-                return {
-                    "status_code": r.status,
-                    "preview": text[:1000]
-                }
-
-    except Exception as e:
-        return {
-            "error": str(e),
-            "type": str(type(e))
-        }
+            return {
+                "status_code": r.status,
+                "raw_preview": data[:1000]
+            }
