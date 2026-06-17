@@ -32,19 +32,19 @@ async def health():
 # -------------------------
 @app.get("/symbols")
 async def symbols():
-    async with aiohttp.ClientSession() as session:
-        async with session.get(BINANCE_URL) as r:
-            data = await r.json()
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(BINANCE_URL) as r:
 
-    return [
-        {
-            "symbol": x["symbol"],
-            "price": float(x["lastPrice"]),
-            "change": float(x["priceChangePercent"]),
-            "volume": float(x["quoteVolume"])
+                return {
+                    "status_code": r.status,
+                    "preview": await r.text()
+                }
+
+    except Exception as e:
+        return {
+            "error": str(e)
         }
-        for x in data
-    ]
 
 
 # -------------------------
