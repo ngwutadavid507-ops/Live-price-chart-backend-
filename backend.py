@@ -119,3 +119,10 @@ async def candles(symbol: str):
 @app.get("/")
 async def home():
     return {"status": "running", "engine": "unified cmc + binance"}
+@app.get("/price/{symbol}")
+async def price(symbol: str):
+    url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}USDT"
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as r:
+            return await r.json()
