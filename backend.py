@@ -1,11 +1,157 @@
-from fastapi import FastAPI, WebSocket
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
 import aiohttp
 import asyncio
 import time
 import os
+from collections import defaultdict
 
-app = FastAPI()
+# =========================
+# CONFIG
+# =========================
+CMC_API_KEY = os.getenv("CMC_API_KEY")
+CMC_URL = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
+
+CACHE_TTL_SECONDS = 10
+WS_BROADCAST_INTERVAL = 5
+FETCH_TIMEOUT = 15
+
+CMC_LIMIT = 2500  # 🔥 FIXED (your confirmed working size)
+
+
+# =========================
+# STATE
+# =========================
+class AppState:
+    def __init__(self):
+        self.hot_cache = []
+        self.all_cache = []
+        self.last_update = 0
+        self.ws_clients = set()
+        self._lock = asyncio.Lock()
+
+    async def update_cache(self, hot, all_):
+        async with self._lock:
+            self.hot_cache = hot
+            self.all_cache = all_
+            self.last_update = time.time()
+
+    def hot(self):
+        return self.hot_cache
+
+    def all(self):
+        return self.all_cache
+
+
+app_state = AppState()
+
+
+# =========================
+# FETCH CMC (SAFE)
+# =========================
+async def fetch_cmc(limit=100):
+    if not CMC_API_KEY:
+        return []
+
+    headers = {"X-CMC_PRO_API_KEY": CMC_API_KEY}
+    params = {"start": 1, "limit": limit, "convert": "USD"}
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                CMC_URL,
+                headers=headers,
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=FETCH_TIMEOUT),
+            ) as r:
+
+                if r.status != 200:
+                    return []
+
+                data = await r.json()
+                return data.get("data", [])
+
+    except Exception as e:
+        print("CMC ERROR:", e)
+        return []
+
+
+def transform(item):
+    q = item.get("quote", {}).get("USD", {})
+    return {
+        "symbol": item.get("symbol"),
+        "name": item.get("name"),
+        "price": q.get("price", 0),
+        "change": q.get("percent_change_24h", 0),
+        "volume": q.get("volume_24h", 0),
+    }
+
+
+def transform_hot(item):
+    q = item.get("quote", {}).get("USD", {})
+    return {
+        "symbol": item.get("symbol"),
+        "price": q.get("price", 0),
+        "change": q.get("percent_change_24h", 0),
+    }
+
+
+# =========================
+# BACKGROUND UPDATER
+# =========================
+async def updater():
+    while True:
+        raw = await fetch_cmc(CMC_LIMIT)
+
+        if raw:
+            hot = [transform_hot(x) for x in raw[:50]]
+            all_ = [transform(x) for x in raw]
+
+            await app_state.update_cache(hot, all_)
+
+        await asyncio.sleep(CACHE_TTL_SECONDS)
+
+
+# =========================
+# BROADCAST
+# =========================
+async def broadcaster():
+    while True:
+        await asyncio.sleep(WS_BROADCAST_INTERVAL)
+
+        if not app_state.ws_clients:
+            continue
+
+        payload = {
+            "type": "hot",
+            "data": app_state.hot(),
+            "time": time.time()
+        }
+
+        dead = set()
+
+        for ws in app_state.ws_clients:
+            try:
+                await ws.send_json(payload)
+            except:
+                dead.add(ws)
+
+        for d in dead:
+            app_state.ws_clients.discard(d)
+
+
+# =========================
+# APP
+# =========================
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    asyncio.create_task(updater())
+    asyncio.create_task(broadcaster())
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -15,114 +161,63 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-CMC_API_KEY = os.getenv("CMC_API_KEY")
 
-CMC_URL = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
-BINANCE_PRICE_URL = "https://api.binance.com/api/v3/ticker/price"
-BINANCE_KLINES_URL = "https://api.binance.com/api/v3/klines"
-
-
-# ---------------------------
-# FETCH CMC (GLOBAL TOKENS)
-# ---------------------------
-async def fetch_cmc(limit=200):
-    headers = {"X-CMC_PRO_API_KEY": CMC_API_KEY}
-    params = {"start": 1, "limit": limit, "convert": "USD"}
-
-    async with aiohttp.ClientSession() as session:
-        async with session.get(CMC_URL, headers=headers, params=params) as r:
-            data = await r.json()
-
-    return data.get("data", [])
-
-
-# ---------------------------
-# FETCH BINANCE PRICES
-# ---------------------------
-async def fetch_binance_prices():
-    async with aiohttp.ClientSession() as session:
-        async with session.get(BINANCE_PRICE_URL) as r:
-            data = await r.json()
-
-    # map BTCUSDT → BTC
-    mapped = {}
-    for item in data:
-        symbol = item["symbol"]
-        if symbol.endswith("USDT"):
-            base = symbol.replace("USDT", "")
-            mapped[base] = float(item["price"])
-
-    return mapped
-
-
-# ---------------------------
-# UNIFIED SYMBOLS
-# ---------------------------
-@app.get("/symbols")
-async def symbols():
-    cmc_data, binance_data = await asyncio.gather(
-        fetch_cmc(300),
-        fetch_binance_prices()
-    )
-
-    result = []
-
-    for x in cmc_data:
-        symbol = x["symbol"]
-        quote = x["quote"]["USD"]
-
-        binance_price = binance_data.get(symbol)
-
-        result.append({
-            "symbol": symbol,
-            "name": x["name"],
-            "price": binance_price if binance_price else quote["price"],
-            "change": quote.get("percent_change_24h", 0),
-            "volume": quote.get("volume_24h", 0),
-            "source": "binance" if binance_price else "cmc"
-        })
-
-    return result
-
-
-# ---------------------------
-# CANDLESTICKS (BINANCE REAL DATA)
-# ---------------------------
-@app.get("/candles/{symbol}")
-async def candles(symbol: str):
-    pair = f"{symbol}USDT"
-
-    url = f"{BINANCE_KLINES_URL}?symbol={pair}&interval=1m&limit=50"
-
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as r:
-            data = await r.json()
-
-    candles = []
-
-    for c in data:
-        candles.append({
-            "time": c[0],
-            "open": float(c[1]),
-            "high": float(c[2]),
-            "low": float(c[3]),
-            "close": float(c[4]),
-            "volume": float(c[5])
-        })
-
-    return candles
-
-
-# ---------------------------
-# HEALTH
-# ---------------------------
+# =========================
+# ROUTES
+# =========================
 @app.get("/")
 async def home():
-    return {"status": "running", "engine": "unified cmc + binance"}
-@app.get("/price/{symbol}")
-async def price(symbol: str):
-    url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}USDT"
+    return {"status": "running"}
 
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as r:
-            return await r.json()
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "ok",
+        "ws_clients": len(app_state.ws_clients),
+        "hot_cache": len(app_state.hot()),
+        "all_cache": len(app_state.all()),
+        "last_update": app_state.last_update,
+    }
+
+
+@app.get("/symbols")
+async def symbols():
+    data = app_state.all()
+
+    if not data:
+        raw = await fetch_cmc(CMC_LIMIT)
+        if not raw:
+            raise HTTPException(500, "CMC fetch failed")
+
+        data = [transform(x) for x in raw]
+        hot = [transform_hot(x) for x in raw[:50]]
+
+        await app_state.update_cache(hot, data)
+
+    return data
+
+
+# =========================
+# WEBSOCKET
+# =========================
+@app.websocket("/ws")
+async def ws(ws: WebSocket):
+    await ws.accept()
+    app_state.ws_clients.add(ws)
+
+    try:
+        await ws.send_json({"type": "hot", "data": app_state.hot()})
+
+        while True:
+            try:
+                msg = await asyncio.wait_for(ws.receive_text(), timeout=30)
+                if msg == "ping":
+                    await ws.send_json({"type": "pong"})
+            except asyncio.TimeoutError:
+                await ws.send_json({"type": "keepalive"})
+
+    except WebSocketDisconnect:
+        pass
+    finally:
+        app_state.ws_clients.discard(ws)
