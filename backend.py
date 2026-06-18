@@ -118,5 +118,4 @@ async def candles(symbol: str):
 # ---------------------------
 @app.get("/")
 async def home():
-    return {"status": "running", "engine": "unified cmc + binance"
-    
+    return {"status": "running", "engine": "unified cmc + binance"}
