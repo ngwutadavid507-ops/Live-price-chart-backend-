@@ -33,20 +33,38 @@ http_session = None
 #  HTTP CLIENT
 # ═══════════════════════════════════════════════════════════════
 async def fetch_json(url, headers=None, params=None):
+    global http_session
+    if http_session is None:
+        print(f"[FETCH] ERROR: http_session is None for {url}")
+        return None
+    
     try:
+        print(f"[FETCH] Starting: {url}")
         async with http_session.get(url, headers=headers, params=params) as r:
-            return await r.json()
+            print(f"[FETCH] Status {r.status} for {url}")
+            text = await r.text()
+            print(f"[FETCH] Response length: {len(text)} for {url}")
+            if r.status != 200:
+                print(f"[FETCH] ERROR {r.status}: {text[:200]}")
+                return None
+            import json
+            return json.loads(text)
     except Exception as e:
-        print(f"[FETCH ERROR] {url}: {e}")
+        print(f"[FETCH] EXCEPTION {url}: {type(e).__name__}: {e}")
         return None
 
 # ═══════════════════════════════════════════════════════════════
 #  BINANCE
 # ═══════════════════════════════════════════════════════════════
 async def fetch_binance():
+    print("[BINANCE] Starting fetch...")
     data = await fetch_json(BINANCE_PRICE_URL)
+    print(f"[BINANCE] Got data type: {type(data)}")
+    
     if not isinstance(data, list):
+        print(f"[BINANCE] ERROR: Expected list, got {type(data)}")
         return {}
+    
     out = {}
     for i in data:
         if not isinstance(i, dict):
@@ -58,20 +76,30 @@ async def fetch_binance():
                 out[sym.replace("USDT", "")] = float(price)
             except:
                 continue
+    
+    print(f"[BINANCE] Mapped {len(out)} symbols")
     return out
 
 # ═══════════════════════════════════════════════════════════════
 #  CMC
 # ═══════════════════════════════════════════════════════════════
 async def fetch_cmc(limit=2500):
+    print(f"[CMC] Starting fetch... Key present: {bool(CMC_API_KEY)}")
     if not CMC_API_KEY:
-        print("[CMC] No API key")
+        print("[CMC] ERROR: No API key configured!")
         return []
+    
     headers = {"X-CMC_PRO_API_KEY": CMC_API_KEY}
     params = {"start": 1, "limit": limit, "convert": "USD"}
+    
     data = await fetch_json(CMC_URL, headers=headers, params=params)
+    print(f"[CMC] Got data type: {type(data)}")
+    
     if not data or "data" not in data:
+        print(f"[CMC] ERROR: No 'data' key in response. Keys: {list(data.keys()) if isinstance(data, dict) else 'N/A'}")
         return []
+    
+    print(f"[CMC] Got {len(data['data'])} symbols")
     return data["data"]
 
 # ═══════════════════════════════════════════════════════════════
@@ -79,7 +107,14 @@ async def fetch_cmc(limit=2500):
 # ═══════════════════════════════════════════════════════════════
 async def build_cache():
     global cache
-    cmc, binance = await asyncio.gather(fetch_cmc(2500), fetch_binance())
+    print("[CACHE] Building cache...")
+    
+    cmc_task = asyncio.create_task(fetch_cmc(2500))
+    binance_task = asyncio.create_task(fetch_binance())
+    
+    cmc, binance = await asyncio.gather(cmc_task, binance_task)
+    print(f"[CACHE] CMC: {len(cmc)} items, Binance: {len(binance)} items")
+    
     result = []
     for x in cmc:
         if not isinstance(x, dict):
@@ -94,14 +129,18 @@ async def build_cache():
             "change": quote.get("percent_change_24h", 0),
             "volume": quote.get("volume_24h", 0),
         })
-    if not result:
+    
+    # Fallback: Binance-only if CMC empty
+    if not result and binance:
+        print("[CACHE] Using Binance fallback")
         for k, v in binance.items():
             result.append({"symbol": k, "name": k, "price": v, "change": 0, "volume": 0})
+    
     cache["all"] = result
     cache["hot"] = result[:100]
     cache["ready"] = True
     cache["last_update"] = time.time()
-    print(f"[Cache] {len(result)} symbols")
+    print(f"[CACHE] Built: {len(result)} symbols")
 
 # ═══════════════════════════════════════════════════════════════
 #  BACKGROUND
@@ -111,7 +150,7 @@ async def background_fetcher():
         try:
             await build_cache()
         except Exception as e:
-            print(f"[BG ERROR] {e}")
+            print(f"[BG ERROR] {type(e).__name__}: {e}")
         await asyncio.sleep(CACHE_TTL)
 
 async def ws_broadcaster():
@@ -150,12 +189,16 @@ def check_rate_limit(ip):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global http_session
+    print("[STARTUP] Creating session...")
     http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
+    print(f"[STARTUP] Session created: {http_session}")
+    print(f"[STARTUP] CMC_KEY present: {bool(CMC_API_KEY)}")
+    
     tasks = [
         asyncio.create_task(background_fetcher()),
         asyncio.create_task(ws_broadcaster())
     ]
-    print("[Startup] Ready")
+    print("[STARTUP] Ready")
     yield
     for t in tasks:
         t.cancel()
@@ -184,7 +227,8 @@ async def health():
         "cache_ready": cache["ready"],
         "symbols": len(cache["all"]),
         "ws_clients": len(ws_clients),
-        "cmc_key_loaded": bool(CMC_API_KEY)
+        "cmc_key_loaded": bool(CMC_API_KEY),
+        "session_alive": http_session is not None and not http_session.closed
     }
 
 @app.get("/symbols")
@@ -226,4 +270,4 @@ async def ws_endpoint(ws: WebSocket):
         pass
     finally:
         ws_clients.discard(ws)
-    
+        
