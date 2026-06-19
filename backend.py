@@ -12,13 +12,11 @@ from collections import defaultdict
 # ═══════════════════════════════════════════════════════════════
 CMC_API_KEY = os.getenv("CMC_API_KEY")
 
-# CoinGecko — free, no key, works from Render
-COINGECKO_URL = "https://api.coingecko.com/api/v3/coins/markets"
+# CoinGecko — free tier: 10-30 calls/minute
+COINGECKO_MARKETS = "https://api.coingecko.com/api/v3/coins/markets"
+COINGECKO_OHLC = "https://api.coingecko.com/api/v3/coins/{id}/ohlc"
 
-# CryptoCompare — free, no key, works from Render  
-CRYPTOCOMPARE_HISTO_URL = "https://min-api.cryptocompare.com/data/v2/histominute"
-
-CACHE_TTL = 10
+CACHE_TTL = 30  # Slow down to avoid CoinGecko rate limits
 WS_INTERVAL = 10
 RATE_LIMIT_MAX = 10
 RATE_LIMIT_WINDOW = 60
@@ -27,7 +25,7 @@ MAX_WS_CLIENTS = 100
 # ═══════════════════════════════════════════════════════════════
 #  STATE
 # ═══════════════════════════════════════════════════════════════
-cache = {"all": [], "hot": [], "ready": False, "last_update": 0}
+cache = {"all": [], "hot": [], "ready": False, "last_update": 0, "id_map": {}}
 rate_limits = defaultdict(list)
 ws_clients = set()
 http_session = None
@@ -42,6 +40,9 @@ async def fetch_json(url, headers=None, params=None):
     try:
         async with http_session.get(url, headers=headers, params=params, timeout=30) as r:
             text = await r.text()
+            if r.status == 429:
+                print(f"[FETCH] RATE LIMITED: {url[:60]}")
+                return None
             if r.status != 200:
                 print(f"[FETCH] HTTP {r.status}: {text[:100]}")
                 return None
@@ -52,9 +53,9 @@ async def fetch_json(url, headers=None, params=None):
         return None
 
 # ═══════════════════════════════════════════════════════════════
-#  COINGECKO (Primary — free, no key, works from Render)
+#  COINGECKO MARKETS
 # ═══════════════════════════════════════════════════════════════
-async def fetch_coingecko():
+async def fetch_coingecko_markets():
     params = {
         "vs_currency": "usd",
         "order": "market_cap_desc",
@@ -63,73 +64,49 @@ async def fetch_coingecko():
         "sparkline": "false",
         "price_change_percentage": "24h"
     }
-
-    data = await fetch_json(COINGECKO_URL, params=params)
-
+    
+    data = await fetch_json(COINGECKO_MARKETS, params=params)
+    
     if not isinstance(data, list):
-        print(f"[COINGECKO] Bad response type: {type(data)}")
+        print(f"[COINGECKO] Bad response: {type(data)}")
         return []
-
+    
     result = []
+    id_map = {}  # symbol -> id mapping for OHLC
+    
     for coin in data:
         if not isinstance(coin, dict):
             continue
+        symbol = coin.get("symbol", "").upper()
         result.append({
-            "symbol": coin.get("symbol", "").upper(),
+            "symbol": symbol,
             "name": coin.get("name"),
             "price": coin.get("current_price") or 0,
             "change": coin.get("price_change_percentage_24h") or 0,
             "volume": coin.get("total_volume") or 0,
         })
-
-    print(f"[COINGECKO] Fetched {len(result)} coins")
-    return result
-
-# ═══════════════════════════════════════════════════════════════
-#  CMC (Fallback only)
-# ═══════════════════════════════════════════════════════════════
-async def fetch_cmc(limit=2500):
-    if not CMC_API_KEY:
-        return []
-    headers = {"X-CMC_PRO_API_KEY": CMC_API_KEY}
-    params = {"start": 1, "limit": limit, "convert": "USD"}
-    data = await fetch_json("https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest",
-                            headers=headers, params=params)
-    if not data or "data" not in data:
-        return []
-    return [
-        {
-            "symbol": x.get("symbol"),
-            "name": x.get("name"),
-            "price": x.get("quote", {}).get("USD", {}).get("price", 0),
-            "change": x.get("quote", {}).get("USD", {}).get("percent_change_24h", 0),
-            "volume": x.get("quote", {}).get("USD", {}).get("volume_24h", 0),
-        }
-        for x in data["data"] if isinstance(x, dict)
-    ]
+        id_map[symbol] = coin.get("id")
+    
+    print(f"[COINGECKO] Markets: {len(result)} coins")
+    return result, id_map
 
 # ═══════════════════════════════════════════════════════════════
 #  BUILD CACHE
 # ═══════════════════════════════════════════════════════════════
 async def build_cache():
     global cache
-
-    # Try CoinGecko first
-    result = await fetch_coingecko()
-
-    # Fallback to CMC
-    if not result and CMC_API_KEY:
-        print("[CACHE] Falling back to CMC...")
-        result = await fetch_cmc(2500)
-
+    
+    result, id_map = await fetch_coingecko_markets()
+    
     if not result:
-        print("[CACHE] WARNING: No data available")
+        print("[CACHE] No data from CoinGecko")
         if not cache["all"]:
-            cache["ready"] = True  # Mark ready even if empty
+            cache["ready"] = True
         return
-
+    
     cache["all"] = result
     cache["hot"] = result[:100]
+    cache["id_map"] = id_map
     cache["ready"] = True
     cache["last_update"] = time.time()
     print(f"[CACHE] Built: {len(result)} symbols")
@@ -209,8 +186,7 @@ async def home():
     return {
         "status": "running",
         "symbols": len(cache["all"]),
-        "source": "coingecko",
-        "cmc_key_loaded": bool(CMC_API_KEY)
+        "source": "coingecko"
     }
 
 @app.get("/health")
@@ -219,8 +195,7 @@ async def health():
         "status": "ok",
         "cache_ready": cache["ready"],
         "symbols": len(cache["all"]),
-        "ws_clients": len(ws_clients),
-        "cmc_key_loaded": bool(CMC_API_KEY)
+        "ws_clients": len(ws_clients)
     }
 
 @app.get("/symbols")
@@ -235,28 +210,78 @@ async def symbols(request: Request):
 async def candles(symbol: str, request: Request):
     if not check_rate_limit(request.client.host):
         raise HTTPException(429, "Rate limit")
-
-    # CryptoCompare for candles (works from Render)
-    url = f"{CRYPTOCOMPARE_HISTO_URL}?fsym={symbol.upper()}&tsym=USD&limit=50&aggregate=1"
-    data = await fetch_json(url)
-
+    
+    symbol_upper = symbol.upper()
+    
+    # Get CoinGecko ID from cache
+    coin_id = cache.get("id_map", {}).get(symbol_upper)
+    
+    if not coin_id:
+        print(f"[CANDLES] No ID found for {symbol_upper}")
+        return []
+    
+    # CoinGecko OHLC: days=1 for 1-day hourly, or use /market_chart for minute data
+    # We'll use market_chart with minute granularity (last ~2 hours)
+    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
+    params = {
+        "vs_currency": "usd",
+        "days": "1",  # 1 day of data
+    }
+    
+    data = await fetch_json(url, params=params)
+    
     if not data or not isinstance(data, dict):
         return []
-
-    histo_data = data.get("Data", {}).get("Data", [])
-    if not isinstance(histo_data, list):
+    
+    # prices: [[timestamp, price], ...]
+    prices = data.get("prices", [])
+    if not prices or len(prices) < 2:
         return []
-
-    return [
-        {
-            "time": c.get("time", 0) * 1000,
-            "open": c.get("open", 0),
-            "high": c.get("high", 0),
-            "low": c.get("low", 0),
-            "close": c.get("close", 0),
-        }
-        for c in histo_data if isinstance(c, dict)
-    ]
+    
+    # Convert price points to candles (aggregate into ~10-min intervals)
+    candles = []
+    interval_ms = 10 * 60 * 1000  # 10 minutes
+    
+    current_bucket = []
+    bucket_start = None
+    
+    for ts, price in prices:
+        if bucket_start is None:
+            bucket_start = ts
+        
+        if ts - bucket_start >= interval_ms:
+            # Finalize previous bucket
+            if current_bucket:
+                opens = [p for _, p in current_bucket]
+                highs = [p for _, p in current_bucket]
+                lows = [p for _, p in current_bucket]
+                candles.append({
+                    "time": bucket_start,
+                    "open": opens[0],
+                    "high": max(highs),
+                    "low": min(lows),
+                    "close": opens[-1]
+                })
+            bucket_start = ts
+            current_bucket = []
+        
+        current_bucket.append((ts, price))
+    
+    # Don't forget last bucket
+    if current_bucket:
+        opens = [p for _, p in current_bucket]
+        highs = [p for _, p in current_bucket]
+        lows = [p for _, p in current_bucket]
+        candles.append({
+            "time": bucket_start,
+            "open": opens[0],
+            "high": max(highs),
+            "low": min(lows),
+            "close": opens[-1]
+        })
+    
+    print(f"[CANDLES] {symbol_upper}: {len(candles)} candles from {len(prices)} price points")
+    return candles
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
@@ -280,3 +305,4 @@ async def ws_endpoint(ws: WebSocket):
         pass
     finally:
         ws_clients.discard(ws)
+                                
