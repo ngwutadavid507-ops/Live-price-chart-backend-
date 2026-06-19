@@ -12,22 +12,13 @@ from collections import defaultdict
 # ═══════════════════════════════════════════════════════════════
 CMC_API_KEY = os.getenv("CMC_API_KEY")
 
-# Alternative APIs that work from Render
+# CoinGecko — free, no key, works from Render
 COINGECKO_URL = "https://api.coingecko.com/api/v3/coins/markets"
-COINGECKO_PARAMS = {
-    "vs_currency": "usd",
-    "order": "market_cap_desc",
-    "per_page": 250,
-    "page": 1,
-    "sparkline": "false",
-    "price_change_percentage": "24h"
-}
 
-# CryptoCompare (no key needed for basic)
-CRYPTOCOMPARE_URL = "https://min-api.cryptocompare.com/data/top/mktcapfull"
+# CryptoCompare — free, no key, works from Render  
 CRYPTOCOMPARE_HISTO_URL = "https://min-api.cryptocompare.com/data/v2/histominute"
 
-CACHE_TTL = 10  # Slower to avoid rate limits
+CACHE_TTL = 10
 WS_INTERVAL = 10
 RATE_LIMIT_MAX = 10
 RATE_LIMIT_WINDOW = 60
@@ -47,74 +38,65 @@ http_session = None
 async def fetch_json(url, headers=None, params=None):
     global http_session
     if http_session is None:
-        print(f"[FETCH] ERROR: Session is None")
         return None
-    
     try:
-        print(f"[FETCH] GET {url[:60]}...")
         async with http_session.get(url, headers=headers, params=params, timeout=30) as r:
             text = await r.text()
-            print(f"[FETCH] Status {r.status} for {url[:60]}")
-            
-            if r.status == 429:
-                print(f"[FETCH] RATE LIMITED on {url[:60]}")
-                return None
             if r.status != 200:
-                print(f"[FETCH] ERROR {r.status}: {text[:100]}")
+                print(f"[FETCH] HTTP {r.status}: {text[:100]}")
                 return None
-            
             import json
             return json.loads(text)
     except Exception as e:
-        print(f"[FETCH] EXCEPTION: {type(e).__name__}: {str(e)[:100]}")
+        print(f"[FETCH] ERROR: {type(e).__name__}: {str(e)[:80]}")
         return None
 
 # ═══════════════════════════════════════════════════════════════
-#  COINGECKO (Free, no key, works from Render)
+#  COINGECKO (Primary — free, no key, works from Render)
 # ═══════════════════════════════════════════════════════════════
 async def fetch_coingecko():
-    """Fetch top 250 coins from CoinGecko — free, no API key"""
-    params = COINGECKO_PARAMS.copy()
-    params["per_page"] = 250
-    
+    params = {
+        "vs_currency": "usd",
+        "order": "market_cap_desc",
+        "per_page": 250,
+        "page": 1,
+        "sparkline": "false",
+        "price_change_percentage": "24h"
+    }
+
     data = await fetch_json(COINGECKO_URL, params=params)
-    
+
     if not isinstance(data, list):
-        print(f"[COINGECKO] Expected list, got {type(data)}")
+        print(f"[COINGECKO] Bad response type: {type(data)}")
         return []
-    
+
     result = []
     for coin in data:
         if not isinstance(coin, dict):
             continue
-        
         result.append({
             "symbol": coin.get("symbol", "").upper(),
             "name": coin.get("name"),
-            "price": coin.get("current_price", 0),
-            "change": coin.get("price_change_percentage_24h", 0),
-            "volume": coin.get("total_volume", 0),
+            "price": coin.get("current_price") or 0,
+            "change": coin.get("price_change_percentage_24h") or 0,
+            "volume": coin.get("total_volume") or 0,
         })
-    
-    print(f"[COINGECKO] Got {len(result)} coins")
+
+    print(f"[COINGECKO] Fetched {len(result)} coins")
     return result
 
 # ═══════════════════════════════════════════════════════════════
-#  CMC (fallback if credits available)
+#  CMC (Fallback only)
 # ═══════════════════════════════════════════════════════════════
 async def fetch_cmc(limit=2500):
     if not CMC_API_KEY:
         return []
-    
     headers = {"X-CMC_PRO_API_KEY": CMC_API_KEY}
     params = {"start": 1, "limit": limit, "convert": "USD"}
-    
-    data = await fetch_json("https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest", 
+    data = await fetch_json("https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest",
                             headers=headers, params=params)
-    
     if not data or "data" not in data:
         return []
-    
     return [
         {
             "symbol": x.get("symbol"),
@@ -127,35 +109,25 @@ async def fetch_cmc(limit=2500):
     ]
 
 # ═══════════════════════════════════════════════════════════════
-#  BUILD CACHE (CoinGecko primary, CMC fallback)
+#  BUILD CACHE
 # ═══════════════════════════════════════════════════════════════
 async def build_cache():
     global cache
-    
-    print("[CACHE] Building...")
-    
-    # Try CoinGecko first (free, works everywhere)
+
+    # Try CoinGecko first
     result = await fetch_coingecko()
-    
-    # Fallback to CMC if CoinGecko fails and CMC has credits
+
+    # Fallback to CMC
     if not result and CMC_API_KEY:
         print("[CACHE] Falling back to CMC...")
-        cmc_data = await fetch_cmc(2500)
-        result = cmc_data
-    
+        result = await fetch_cmc(2500)
+
     if not result:
-        print("[CACHE] CRITICAL: No data source available!")
-        # Keep old cache if we have one
-        if cache["all"]:
-            print("[CACHE] Keeping stale cache")
-            return
-        # Otherwise empty
-        cache["all"] = []
-        cache["hot"] = []
-        cache["ready"] = True
-        cache["last_update"] = time.time()
+        print("[CACHE] WARNING: No data available")
+        if not cache["all"]:
+            cache["ready"] = True  # Mark ready even if empty
         return
-    
+
     cache["all"] = result
     cache["hot"] = result[:100]
     cache["ready"] = True
@@ -210,8 +182,7 @@ def check_rate_limit(ip):
 async def lifespan(app: FastAPI):
     global http_session
     http_session = aiohttp.ClientSession()
-    print(f"[STARTUP] Session created. CMC key: {bool(CMC_API_KEY)}")
-    
+    print(f"[STARTUP] Ready. CMC key: {bool(CMC_API_KEY)}")
     tasks = [
         asyncio.create_task(background_fetcher()),
         asyncio.create_task(ws_broadcaster())
@@ -238,8 +209,8 @@ async def home():
     return {
         "status": "running",
         "symbols": len(cache["all"]),
-        "cmc_key_loaded": bool(CMC_API_KEY),
-        "source": "coingecko" if cache["all"] else "none"
+        "source": "coingecko",
+        "cmc_key_loaded": bool(CMC_API_KEY)
     }
 
 @app.get("/health")
@@ -249,8 +220,7 @@ async def health():
         "cache_ready": cache["ready"],
         "symbols": len(cache["all"]),
         "ws_clients": len(ws_clients),
-        "cmc_key_loaded": bool(CMC_API_KEY),
-        "cmc_exhausted": True  # We know this from logs
+        "cmc_key_loaded": bool(CMC_API_KEY)
     }
 
 @app.get("/symbols")
@@ -265,22 +235,21 @@ async def symbols(request: Request):
 async def candles(symbol: str, request: Request):
     if not check_rate_limit(request.client.host):
         raise HTTPException(429, "Rate limit")
-    
-    # Use CryptoCompare for candles (works from Render)
+
+    # CryptoCompare for candles (works from Render)
     url = f"{CRYPTOCOMPARE_HISTO_URL}?fsym={symbol.upper()}&tsym=USD&limit=50&aggregate=1"
-    
     data = await fetch_json(url)
-    
+
     if not data or not isinstance(data, dict):
         return []
-    
+
     histo_data = data.get("Data", {}).get("Data", [])
     if not isinstance(histo_data, list):
         return []
-    
+
     return [
         {
-            "time": c.get("time", 0) * 1000,  # Convert to ms
+            "time": c.get("time", 0) * 1000,
             "open": c.get("open", 0),
             "high": c.get("high", 0),
             "low": c.get("low", 0),
@@ -311,4 +280,3 @@ async def ws_endpoint(ws: WebSocket):
         pass
     finally:
         ws_clients.discard(ws)
-    
