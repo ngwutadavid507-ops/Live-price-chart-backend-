@@ -12,13 +12,11 @@ from collections import defaultdict
 #  CONFIG
 # ═══════════════════════════════════════════════════════════════
 CMC_API_KEY = os.getenv("CMC_API_KEY")
-
-# CoinGecko free tier: ~10-30 calls/minute IP-based
 COINGECKO_MARKETS = "https://api.coingecko.com/api/v3/coins/markets"
 COINGECKO_CHART = "https://api.coingecko.com/api/v3/coins/{id}/market_chart"
 
-CACHE_TTL = 60  # 1 minute to stay under rate limit
-WS_INTERVAL = 10
+CACHE_TTL = 60
+WS_INTERVAL = 5
 RATE_LIMIT_MAX = 10
 RATE_LIMIT_WINDOW = 60
 MAX_WS_CLIENTS = 100
@@ -39,22 +37,22 @@ async def fetch_json(url, headers=None, params=None):
     if http_session is None:
         return None
     try:
-        async with http_session.get(url, headers=headers, params=params, timeout=30) as r:
+        async with http_session.get(url, headers=headers, params=params) as r:
             text = await r.text()
             if r.status == 429:
-                print(f"[FETCH] RATE LIMITED")
+                print(f"[FETCH] RATE LIMITED: {url[:60]}")
                 return None
             if r.status != 200:
-                print(f"[FETCH] HTTP {r.status}")
+                print(f"[FETCH] HTTP {r.status}: {text[:100]}")
                 return None
             import json
             return json.loads(text)
     except Exception as e:
-        print(f"[FETCH] ERROR: {type(e).__name__}")
+        print(f"[FETCH] ERROR: {type(e).__name__}: {str(e)[:80]}")
         return None
 
 # ═══════════════════════════════════════════════════════════════
-#  COINGECKO MARKETS
+#  COINGECKO
 # ═══════════════════════════════════════════════════════════════
 async def fetch_coingecko_markets():
     params = {
@@ -65,16 +63,11 @@ async def fetch_coingecko_markets():
         "sparkline": "false",
         "price_change_percentage": "24h"
     }
-    
     data = await fetch_json(COINGECKO_MARKETS, params=params)
-    
     if not isinstance(data, list):
-        print(f"[COINGECKO] Bad response: {type(data)}")
         return [], {}
-    
     result = []
     id_map = {}
-    
     for coin in data:
         if not isinstance(coin, dict):
             continue
@@ -85,9 +78,11 @@ async def fetch_coingecko_markets():
             "price": coin.get("current_price") or 0,
             "change": coin.get("price_change_percentage_24h") or 0,
             "volume": coin.get("total_volume") or 0,
+            "market_cap": coin.get("market_cap") or 0,
+            "high_24h": coin.get("high_24h") or 0,
+            "low_24h": coin.get("low_24h") or 0,
         })
         id_map[symbol] = coin.get("id")
-    
     print(f"[COINGECKO] Markets: {len(result)} coins")
     return result, id_map
 
@@ -96,15 +91,12 @@ async def fetch_coingecko_markets():
 # ═══════════════════════════════════════════════════════════════
 async def build_cache():
     global cache
-    
     result, id_map = await fetch_coingecko_markets()
-    
     if not result:
         print("[CACHE] No data from CoinGecko")
         if not cache["all"]:
             cache["ready"] = True
         return
-    
     cache["all"] = result
     cache["hot"] = result[:100]
     cache["id_map"] = id_map
@@ -184,11 +176,7 @@ app.add_middleware(
 # ═══════════════════════════════════════════════════════════════
 @app.get("/")
 async def home():
-    return {
-        "status": "running",
-        "symbols": len(cache["all"]),
-        "source": "coingecko"
-    }
+    return {"status": "running", "symbols": len(cache["all"]), "source": "coingecko"}
 
 @app.get("/health")
 async def health():
@@ -208,55 +196,54 @@ async def symbols(request: Request):
     return cache["all"]
 
 @app.get("/candles/{symbol}")
-async def candles(symbol: str, request: Request):
+async def candles(symbol: str, request: Request, days: str = "7"):
     if not check_rate_limit(request.client.host):
         raise HTTPException(429, "Rate limit")
-    
+
     symbol_upper = symbol.upper()
     coin_id = cache.get("id_map", {}).get(symbol_upper)
-    
+
     if not coin_id:
-        print(f"[CANDLES] No ID for {symbol_upper}, using demo")
         return generate_demo_candles()
-    
+
     url = COINGECKO_CHART.format(id=coin_id)
-    params = {"vs_currency": "usd", "days": "1"}
-    
+    params = {"vs_currency": "usd", "days": days}
+
     data = await fetch_json(url, params=params)
-    
+
     if not data or not isinstance(data, dict):
-        print(f"[CANDLES] No data for {symbol_upper}, using demo")
         return generate_demo_candles()
-    
+
     prices = data.get("prices", [])
     if not prices or len(prices) < 10:
         return generate_demo_candles()
-    
-    # Aggregate into ~15-min candles
+
+    # Aggregate into candles based on number of data points
+    total_points = len(prices)
+    candles_per_agg = max(1, total_points // 100)  # Target ~100 candles
+
     candles = []
-    interval_ms = 15 * 60 * 1000
     bucket = []
     bucket_start = None
-    
+
     for ts, price in prices:
         if bucket_start is None:
             bucket_start = ts
-        
-        if ts - bucket_start >= interval_ms:
-            if bucket:
-                opens = [p for _, p in bucket]
-                candles.append({
-                    "time": bucket_start,
-                    "open": opens[0],
-                    "high": max(p for _, p in bucket),
-                    "low": min(p for _, p in bucket),
-                    "close": opens[-1]
-                })
-            bucket_start = ts
-            bucket = []
-        
+
         bucket.append((ts, price))
-    
+
+        if len(bucket) >= candles_per_agg:
+            opens = [p for _, p in bucket]
+            candles.append({
+                "time": bucket_start,
+                "open": opens[0],
+                "high": max(p for _, p in bucket),
+                "low": min(p for _, p in bucket),
+                "close": opens[-1]
+            })
+            bucket_start = None
+            bucket = []
+
     if bucket:
         opens = [p for _, p in bucket]
         candles.append({
@@ -266,24 +253,23 @@ async def candles(symbol: str, request: Request):
             "low": min(p for _, p in bucket),
             "close": opens[-1]
         })
-    
-    print(f"[CANDLES] {symbol_upper}: {len(candles)} candles")
+
+    print(f"[CANDLES] {symbol_upper}: {len(candles)} candles from {total_points} points")
     return candles
 
 def generate_demo_candles():
-    """Generate realistic demo candles when API fails"""
     now = int(time.time() * 1000)
-    base_price = 65000 if random.random() > 0.5 else 3500
+    base_price = 50000 + random.random() * 20000
     candles = []
-    
-    for i in range(50):
-        ts = now - (50 - i) * 15 * 60 * 1000
-        change = (random.random() - 0.5) * 0.02
-        open_p = base_price * (1 + change)
-        close_p = open_p * (1 + (random.random() - 0.5) * 0.01)
+
+    for i in range(100):
+        ts = now - (100 - i) * 3600 * 1000
+        change = (random.random() - 0.48) * 0.02
+        open_p = base_price
+        close_p = base_price * (1 + change)
         high_p = max(open_p, close_p) * (1 + random.random() * 0.005)
         low_p = min(open_p, close_p) * (1 - random.random() * 0.005)
-        
+
         candles.append({
             "time": ts,
             "open": round(open_p, 2),
@@ -292,7 +278,7 @@ def generate_demo_candles():
             "close": round(close_p, 2)
         })
         base_price = close_p
-    
+
     return candles
 
 @app.websocket("/ws")
