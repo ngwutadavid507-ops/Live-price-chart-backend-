@@ -546,15 +546,17 @@ async def home():
 
 @app.get("/health")
 async def health():
-    ex_count = sum(1 for c in cache["all"] if c.get("price_confidence") == "exchange")
-    return {
-        "status": "ok", "version": "v7",
-        "cache_ready": cache["ready"],
-        "symbols": len(cache["all"]),
-        "exchange_prices": ex_count,
-        "ws_clients": len(ws_clients),
-        "source_log": cache.get("source_log", []),
-        "cache_age_seconds": int(time.time() - cache.get("last_update", 0))
+    try:
+        ex_count = sum(1 for c in cache.get("all", []) if c.get("price_confidence") == "exchange")
+        return {
+            "status": "ok", "version": "v7",
+            "cache_ready": cache.get("ready", False),
+            "symbols": len(cache.get("all", [])),
+            "exchange_prices": ex_count,
+            "source_log": cache.get("source_log", [])
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
     }
 
 @app.get("/symbols")
