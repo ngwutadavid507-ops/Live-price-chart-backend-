@@ -551,4 +551,64 @@ async def candles(symbol: str, request: Request, days: str = "7"):
             bucket_start = None
             bucket = []
     if bucket:
-        opens = 
+        opens = [p for _, p in bucket]
+        candles.append({
+            "time": bucket_start,
+            "open": opens[0],
+            "high": max(p for _, p in bucket),
+            "low": min(p for _, p in bucket),
+            "close": opens[-1]
+        })
+    return candles
+
+def generate_demo_candles(symbol="BTC"):
+    seed = sum(ord(c) for c in symbol)
+    rng = random.Random(seed)
+    now = int(time.time() * 1000)
+    base_price = 50000 + rng.random() * 50000
+    if symbol == "BTC":
+        base_price = 63900
+    elif symbol == "ETH":
+        base_price = 3450
+    elif symbol == "SOL":
+        base_price = 145
+    candles = []
+    for i in range(100):
+        ts = now - (100 - i) * 3600 * 1000
+        change = (rng.random() - 0.48) * 0.02
+        open_p = base_price
+        close_p = base_price * (1 + change)
+        high_p = max(open_p, close_p) * (1 + rng.random() * 0.005)
+        low_p = min(open_p, close_p) * (1 - rng.random() * 0.005)
+        candles.append({
+            "time": ts,
+            "open": round(open_p, 2),
+            "high": round(high_p, 2),
+            "low": round(low_p, 2),
+            "close": round(close_p, 2)
+        })
+        base_price = close_p
+    return candles
+
+@app.websocket("/ws")
+async def ws_endpoint(ws: WebSocket):
+    if len(ws_clients) >= MAX_WS_CLIENTS:
+        await ws.close(code=1008)
+        return
+    await ws.accept()
+    ws_clients.add(ws)
+    if cache["ready"]:
+        await ws.send_json({
+            "type": "hot",
+            "data": cache["hot"],
+            "timestamp": int(time.time() * 1000)
+        })
+    try:
+        while True:
+            msg = await asyncio.wait_for(ws.receive_text(), timeout=30)
+            if msg == "ping":
+                await ws.send_json({"type": "pong"})
+    except (WebSocketDisconnect, asyncio.TimeoutError):
+        pass
+    finally:
+        ws_clients.discard(ws)
