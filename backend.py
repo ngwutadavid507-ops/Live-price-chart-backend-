@@ -553,4 +553,122 @@ async def health():
         "symbols": len(cache["all"]),
         "exchange_prices": ex_count,
         "ws_clients": len(ws_clients),
-        "sourc
+        "source_log": cache.get("source_log", []),
+        "cache_age_seconds": int(time.time() - cache.get("last_update", 0))
+    }
+
+@app.get("/symbols")
+async def symbols(request: Request):
+    if not check_rate_limit(request.client.host):
+        raise HTTPException(429, "Rate limit")
+    if not cache["ready"]:
+        await build_cache()
+    return cache["all"]
+
+@app.get("/candles/{symbol}")
+async def candles(symbol: str, request: Request, days: str = "7"):
+    if not check_rate_limit(request.client.host):
+        raise HTTPException(429, "Rate limit")
+
+    symbol_upper = symbol.upper()
+    coin_id = cache.get("id_map", {}).get(symbol_upper)
+
+    if not coin_id:
+        return generate_demo_candles(symbol_upper)
+
+    url = COINGECKO_CHART.format(id=coin_id)
+    params = {"vs_currency": "usd", "days": days}
+
+    data = await fetch_json(url, params=params, timeout=20)
+
+    if not data or not isinstance(data, dict) or data.get("_error"):
+        return generate_demo_candles(symbol_upper)
+
+    prices = data.get("prices", [])
+    if not prices or len(prices) < 10:
+        return generate_demo_candles(symbol_upper)
+
+    total_points = len(prices)
+    candles_per_agg = max(1, total_points // 100)
+
+    candles = []
+    bucket = []
+    bucket_start = None
+
+    for ts, price in prices:
+        if bucket_start is None:
+            bucket_start = ts
+        bucket.append((ts, price))
+        if len(bucket) >= candles_per_agg:
+            opens = [p for _, p in bucket]
+            candles.append({
+                "time": bucket_start,
+                "open": opens[0],
+                "high": max(p for _, p in bucket),
+                "low": min(p for _, p in bucket),
+                "close": opens[-1]
+            })
+            bucket_start = None
+            bucket = []
+
+    if bucket:
+        opens = [p for _, p in bucket]
+        candles.append({
+            "time": bucket_start,
+            "open": opens[0],
+            "high": max(p for _, p in bucket),
+            "low": min(p for _, p in bucket),
+            "close": opens[-1]
+        })
+
+    return candles
+
+def generate_demo_candles(symbol="BTC"):
+    seed = sum(ord(c) for c in symbol)
+    rng = random.Random(seed)
+    now = int(time.time() * 1000)
+    base_price = 50000 + rng.random() * 50000
+    if symbol == "BTC": base_price = 63900
+    elif symbol == "ETH": base_price = 3450
+    elif symbol == "SOL": base_price = 145
+
+    candles = []
+    for i in range(100):
+        ts = now - (100 - i) * 3600 * 1000
+        change = (rng.random() - 0.48) * 0.02
+        open_p = base_price
+        close_p = base_price * (1 + change)
+        high_p = max(open_p, close_p) * (1 + rng.random() * 0.005)
+        low_p = min(open_p, close_p) * (1 - rng.random() * 0.005)
+        candles.append({
+            "time": ts,
+            "open": round(open_p, 2),
+            "high": round(high_p, 2),
+            "low": round(low_p, 2),
+            "close": round(close_p, 2)
+        })
+        base_price = close_p
+    return candles
+
+@app.websocket("/ws")
+async def ws_endpoint(ws: WebSocket):
+    if len(ws_clients) >= MAX_WS_CLIENTS:
+        await ws.close(code=1008)
+        return
+    await ws.accept()
+    ws_clients.add(ws)
+    if cache["ready"]:
+        await ws.send_json({
+            "type": "hot",
+            "data": cache["hot"],
+            "timestamp": int(time.time() * 1000)
+        })
+    try:
+        while True:
+            msg = await asyncio.wait_for(ws.receive_text(), timeout=30)
+            if msg == "ping":
+                await ws.send_json({"type": "pong"})
+    except (WebSocketDisconnect, asyncio.TimeoutError):
+        pass
+    finally:
+        ws_clients.discard(ws)
