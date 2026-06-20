@@ -217,7 +217,13 @@ async def fetch_bingx():
             continue
         high = float(t.get("highPrice") or t.get("high24h") or 0)
         low = float(t.get("lowPrice") or t.get("low24h") or 0)
-        change = float(t.get("priceChangePercent") or t.get("priceChange") or 0)
+        
+        # FIX: BingX returns priceChangePercent with % sign
+        change_raw = t.get("priceChangePercent") or t.get("priceChange") or 0
+        if isinstance(change_raw, str):
+            change_raw = change_raw.replace("%", "").strip()
+        change = float(change_raw)
+        
         volume = float(t.get("quoteVolume") or t.get("volume") or 0)
         coin = {
             "symbol": sym, "name": sym, "price": price,
