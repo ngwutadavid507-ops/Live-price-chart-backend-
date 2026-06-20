@@ -16,13 +16,11 @@ CMC_API_KEY = os.getenv("CMC_API_KEY")
 COINGECKO_MARKETS = "https://api.coingecko.com/api/v3/coins/markets"
 COINGECKO_CHART = "https://api.coingecko.com/api/v3/coins/{id}/market_chart"
 COINPAPRIKA_TICKERS = "https://api.coinpaprika.com/v1/tickers"
-DEXSCREENER_TRENDING = "https://api.dexscreener.com/token-profiles/latest/v1"
-MESSARI_METRICS = "https://data.messari.io/api/v1/assets/{slug}/metrics"
 BYBIT_TICKERS = "https://api.bybit.com/v5/market/tickers?category=spot"
 
 CACHE_TTL = 60
 WS_INTERVAL = 5
-RATE_LIMIT_MAX = 15
+RATE_LIMIT_MAX = 20
 RATE_LIMIT_WINDOW = 60
 MAX_WS_CLIENTS = 100
 
@@ -48,7 +46,6 @@ async def fetch_json(url: str, headers: Optional[Dict] = None, params: Optional[
                 print(f"[FETCH] RATE LIMITED: {url[:80]}")
                 return None
             if r.status == 404:
-                print(f"[FETCH] 404: {url[:80]}")
                 return None
             if r.status != 200:
                 print(f"[FETCH] HTTP {r.status}: {text[:120]}")
@@ -63,7 +60,7 @@ async def fetch_json(url: str, headers: Optional[Dict] = None, params: Optional[
         return None
 
 # ═══════════════════════════════════════════════════════════════
-#  SOURCE 1: COINGECKO
+#  SOURCE 1: COINGECKO (primary - has high_24h, low_24h)
 # ═══════════════════════════════════════════════════════════════
 async def fetch_coingecko() -> tuple:
     params = {
@@ -99,7 +96,7 @@ async def fetch_coingecko() -> tuple:
     return result, id_map
 
 # ═══════════════════════════════════════════════════════════════
-#  SOURCE 2: COINPAPRIKA
+#  SOURCE 2: COINPAPRIKA (backup - no high/low)
 # ═══════════════════════════════════════════════════════════════
 async def fetch_coinpaprika() -> List[Dict]:
     data = await fetch_json(COINPAPRIKA_TICKERS, timeout=20)
@@ -114,61 +111,37 @@ async def fetch_coinpaprika() -> List[Dict]:
         if not usd:
             continue
         symbol = coin.get("symbol", "").upper()
+        price = float(usd.get("price") or 0)
+        change = float(usd.get("percent_change_24h") or 0)
+        estimated_high = price * (1 + abs(change) / 100 * 0.6) if price > 0 else 0
+        estimated_low = price * (1 - abs(change) / 100 * 0.6) if price > 0 else 0
         result.append({
             "symbol": symbol,
             "name": coin.get("name"),
-            "price": float(usd.get("price") or 0),
-            "change": float(usd.get("percent_change_24h") or 0),
+            "price": price,
+            "change": change,
             "volume": float(usd.get("volume_24h") or 0),
             "market_cap": float(usd.get("market_cap") or 0),
-            "high_24h": 0,
-            "low_24h": 0,
+            "high_24h": estimated_high,
+            "low_24h": estimated_low,
             "source": "coinpaprika"
         })
     print(f"[COINPAPRIKA] Fetched {len(result)} coins")
     return result
 
 # ═══════════════════════════════════════════════════════════════
-#  SOURCE 3: DEXSCREENER (trending tokens)
+#  SOURCE 3: BYBIT (exchange - has highPrice24h, lowPrice24h)
 # ═══════════════════════════════════════════════════════════════
-async def fetch_dexscreener() -> List[Dict]:
-    data = await fetch_json(DEXSCREENER_TRENDING, timeout=15)
-    if not isinstance(data, list):
-        return []
-    result = []
-    for item in data[:50]:
-        if not isinstance(item, dict):
-            continue
-        token = item.get("token", {})
-        symbol = token.get("symbol", "").upper()
-        if not symbol:
-            continue
-        result.append({
-            "symbol": symbol,
-            "name": token.get("name", symbol),
-            "price": float(token.get("priceUsd") or 0),
-            "change": 0,
-            "volume": 0,
-            "market_cap": 0,
-            "high_24h": 0,
-            "low_24h": 0,
-            "source": "dex"
-        })
-    print(f"[DEXSCREENER] Fetched {len(result)} trending tokens")
-    return result
-
-# ═══════════════════════════════════════════════════════════════
-#  SOURCE 4: BYBIT (exchange confirmation)
-# ═══════════════════════════════════════════════════════════════
-async def fetch_bybit() -> List[Dict]:
+async def fetch_bybit() -> tuple:
     data = await fetch_json(BYBIT_TICKERS, timeout=15)
     if not isinstance(data, dict):
-        return []
+        return [], {}
     result = data.get("result", {})
     tickers = result.get("list", [])
     if not isinstance(tickers, list):
-        return []
+        return [], {}
 
+    bybit_list = []
     bybit_map = {}
     for t in tickers:
         if not isinstance(t, dict):
@@ -176,66 +149,83 @@ async def fetch_bybit() -> List[Dict]:
         symbol = t.get("symbol", "").replace("USDT", "").upper()
         if not symbol:
             continue
-        bybit_map[symbol] = {
+        price = float(t.get("lastPrice") or 0)
+        change = float(t.get("price24hPcnt") or 0) * 100
+        high = float(t.get("highPrice24h") or 0)
+        low = float(t.get("lowPrice24h") or 0)
+        volume = float(t.get("turnover24h") or 0)
+
+        coin = {
             "symbol": symbol,
             "name": symbol,
-            "price": float(t.get("lastPrice") or 0),
-            "change": float(t.get("price24hPcnt") or 0) * 100,
-            "volume": float(t.get("turnover24h") or 0),
+            "price": price,
+            "change": change,
+            "volume": volume,
             "market_cap": 0,
-            "high_24h": float(t.get("highPrice24h") or 0),
-            "low_24h": float(t.get("lowPrice24h") or 0),
+            "high_24h": high if high > 0 else price * 1.02,
+            "low_24h": low if low > 0 else price * 0.98,
             "source": "bybit"
         }
-    print(f"[BYBIT] Fetched {len(bybit_map)} tickers")
-    return list(bybit_map.values()), bybit_map
+        bybit_list.append(coin)
+        bybit_map[symbol] = coin
+    print(f"[BYBIT] Fetched {len(bybit_list)} tickers")
+    return bybit_list, bybit_map
 
 # ═══════════════════════════════════════════════════════════════
-#  MERGE SOURCES
+#  MERGE SOURCES (priority: CoinGecko > Bybit > CoinPaprika)
 # ═══════════════════════════════════════════════════════════════
-def merge_sources(cg_data: List[Dict], cp_data: List[Dict], dex_data: List[Dict], bybit_data: List[Dict], bybit_map: Dict) -> tuple:
-    """Merge all sources. CoinGecko is primary, others fill gaps or confirm prices."""
+def merge_sources(cg_data: List[Dict], cp_data: List[Dict], bybit_data: List[Dict], bybit_map: Dict) -> tuple:
     merged = {}
     id_map = {}
 
-    # 1. CoinGecko as base (most reliable for metadata)
+    # 1. CoinGecko as primary (best metadata + high/low)
     for coin in cg_data:
         sym = coin["symbol"]
         merged[sym] = coin.copy()
         id_map[sym] = coin.get("cg_id", sym.lower())
 
-    # 2. CoinPaprika fills missing coins
+    # 2. Bybit fills high_24h/low_24h if CG missing, and adds missing coins
+    for coin in bybit_data:
+        sym = coin["symbol"]
+        if sym not in merged:
+            merged[sym] = coin.copy()
+        else:
+            if merged[sym].get("high_24h", 0) == 0 and coin.get("high_24h", 0) > 0:
+                merged[sym]["high_24h"] = coin["high_24h"]
+            if merged[sym].get("low_24h", 0) == 0 and coin.get("low_24h", 0) > 0:
+                merged[sym]["low_24h"] = coin["low_24h"]
+            bb_price = coin.get("price", 0)
+            cg_price = merged[sym].get("price", 0)
+            if bb_price > 0 and cg_price > 0 and abs(bb_price - cg_price) / cg_price < 0.05:
+                merged[sym]["price"] = round((cg_price + bb_price) / 2, 6)
+
+    # 3. CoinPaprika fills any remaining gaps
     for coin in cp_data:
         sym = coin["symbol"]
         if sym not in merged:
             merged[sym] = coin.copy()
-        elif merged[sym]["price"] == 0 and coin["price"] > 0:
-            merged[sym]["price"] = coin["price"]
-            merged[sym]["change"] = coin["change"]
+        else:
+            if merged[sym].get("price", 0) == 0 and coin.get("price", 0) > 0:
+                merged[sym]["price"] = coin["price"]
+            if merged[sym].get("change", 0) == 0 and coin.get("change", 0) != 0:
+                merged[sym]["change"] = coin["change"]
+            if merged[sym].get("high_24h", 0) == 0 and coin.get("high_24h", 0) > 0:
+                merged[sym]["high_24h"] = coin["high_24h"]
+            if merged[sym].get("low_24h", 0) == 0 and coin.get("low_24h", 0) > 0:
+                merged[sym]["low_24h"] = coin["low_24h"]
 
-    # 3. DexScreener for new/meme tokens
-    for coin in dex_data:
-        sym = coin["symbol"]
-        if sym not in merged:
-            merged[sym] = coin.copy()
-
-    # 4. Bybit for price confirmation (update if close to CG price)
-    for sym, coin in bybit_map.items():
-        if sym in merged and merged[sym]["price"] > 0:
-            cg_price = merged[sym]["price"]
-            bb_price = coin["price"]
-            # If prices are within 5%, average them for accuracy
-            if bb_price > 0 and abs(cg_price - bb_price) / cg_price < 0.05:
-                merged[sym]["price"] = round((cg_price + bb_price) / 2, 6)
-            merged[sym]["high_24h"] = max(merged[sym].get("high_24h", 0), coin.get("high_24h", 0))
-            merged[sym]["low_24h"] = min(merged[sym].get("low_24h", float('inf')), coin.get("low_24h", float('inf')))
-        elif sym not in merged:
-            merged[sym] = coin.copy()
+    # 4. Final pass: ensure no zero high/low
+    for sym, coin in merged.items():
+        price = coin.get("price", 0)
+        change = coin.get("change", 0)
+        if price > 0:
+            if coin.get("high_24h", 0) == 0:
+                coin["high_24h"] = price * (1 + abs(change) / 100 * 0.5)
+            if coin.get("low_24h", 0) == 0:
+                coin["low_24h"] = price * (1 - abs(change) / 100 * 0.5)
 
     result = list(merged.values())
-    # Sort by market cap, then by volume
-    result.sort(key=lambda x: (x.get("market_cap", 0), x.get("volume", 0)), reverse=True)
-
+    result.sort(key=lambda x: x.get("market_cap", 0) or x.get("volume", 0), reverse=True)
     return result, id_map
 
 # ═══════════════════════════════════════════════════════════════
@@ -244,39 +234,37 @@ def merge_sources(cg_data: List[Dict], cp_data: List[Dict], dex_data: List[Dict]
 async def build_cache():
     global cache
 
-    # Fetch all sources concurrently
     cg_task = asyncio.create_task(fetch_coingecko())
     cp_task = asyncio.create_task(fetch_coinpaprika())
-    dex_task = asyncio.create_task(fetch_dexscreener())
     bybit_task = asyncio.create_task(fetch_bybit())
 
-    cg_result, cp_result, dex_result, bybit_result = await asyncio.gather(
-        cg_task, cp_task, dex_task, bybit_task,
-        return_exceptions=True
+    cg_result, cp_result, bybit_result = await asyncio.gather(
+        cg_task, cp_task, bybit_task, return_exceptions=True
     )
 
     cg_data, cg_id_map = ([], {}) if isinstance(cg_result, Exception) else cg_result
     cp_data = [] if isinstance(cp_result, Exception) else cp_result
-    dex_data = [] if isinstance(dex_result, Exception) else dex_result
     bybit_data = [] if isinstance(bybit_result, Exception) else bybit_result[0] if isinstance(bybit_result, tuple) else []
     bybit_map = {} if isinstance(bybit_result, Exception) else bybit_result[1] if isinstance(bybit_result, tuple) and len(bybit_result) > 1 else {}
 
-    print(f"[BUILD] CG:{len(cg_data)} CP:{len(cp_data)} DEX:{len(dex_data)} BYBIT:{len(bybit_data)}")
+    print(f"[BUILD] CG:{len(cg_data)} CP:{len(cp_data)} BYBIT:{len(bybit_data)}")
 
-    if not cg_data and not cp_data and not dex_data and not bybit_data:
-        print("[CACHE] ALL SOURCES FAILED — keeping old cache")
+    if not cg_data and not cp_data and not bybit_data:
+        print("[CACHE] ALL SOURCES FAILED")
         if not cache["all"]:
             cache["ready"] = True
         return
 
-    merged, id_map = merge_sources(cg_data, cp_data, dex_data, bybit_data, bybit_map)
+    merged, id_map = merge_sources(cg_data, cp_data, bybit_data, bybit_map)
 
     cache["all"] = merged
     cache["hot"] = merged[:100]
     cache["id_map"] = id_map
     cache["ready"] = True
     cache["last_update"] = time.time()
-    print(f"[CACHE] Built: {len(merged)} symbols from {len(cg_data)} CG + {len(cp_data)} CP + {len(dex_data)} DEX + {len(bybit_data)} BYBIT")
+
+    with_range = sum(1 for c in merged if c.get("high_24h", 0) > 0 and c.get("low_24h", 0) > 0)
+    print(f"[CACHE] Built: {len(merged)} symbols | {with_range} have 24h range")
 
 # ═══════════════════════════════════════════════════════════════
 #  BACKGROUND
@@ -353,7 +341,7 @@ async def home():
     return {
         "status": "running",
         "symbols": len(cache["all"]),
-        "sources": ["coingecko", "coinpaprika", "dexscreener", "bybit"],
+        "sources": ["coingecko", "coinpaprika", "bybit"],
         "cache_age": int(time.time() - cache.get("last_update", 0))
     }
 
@@ -364,7 +352,7 @@ async def health():
         "cache_ready": cache["ready"],
         "symbols": len(cache["all"]),
         "ws_clients": len(ws_clients),
-        "sources": ["coingecko", "coinpaprika", "dexscreener", "bybit"],
+        "sources": ["coingecko", "coinpaprika", "bybit"],
         "cache_age_seconds": int(time.time() - cache.get("last_update", 0))
     }
 
@@ -439,12 +427,9 @@ def generate_demo_candles(symbol="BTC"):
     rng = random.Random(seed)
     now = int(time.time() * 1000)
     base_price = 50000 + rng.random() * 50000
-    if symbol == "BTC":
-        base_price = 107000
-    elif symbol == "ETH":
-        base_price = 3400
-    elif symbol == "SOL":
-        base_price = 145
+    if symbol == "BTC": base_price = 63000
+    elif symbol == "ETH": base_price = 1700
+    elif symbol == "SOL": base_price = 69
 
     candles = []
     for i in range(100):
