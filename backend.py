@@ -10,16 +10,20 @@ from collections import defaultdict
 from typing import Optional, List, Dict, Any
 
 # ═══════════════════════════════════════════════════════════════
-#  CONFIG
+#  CONFIG - MULTIPLE EXCHANGE SOURCES
 # ═══════════════════════════════════════════════════════════════
 COINGECKO_MARKETS = "https://api.coingecko.com/api/v3/coins/markets"
 COINGECKO_CHART = "https://api.coingecko.com/api/v3/coins/{id}/market_chart"
 COINPAPRIKA_TICKERS = "https://api.coinpaprika.com/v1/tickers"
 BYBIT_TICKERS = "https://api.bybit.com/v5/market/tickers?category=spot"
+BINANCE_TICKERS = "https://api.binance.com/api/v3/ticker/24hr"
+OKX_TICKERS = "https://www.okx.com/api/v5/market/tickers?instType=SPOT"
+MEXC_TICKERS = "https://api.mexc.com/api/v3/ticker/24hr"
+BINGX_TICKERS = "https://open-api.bingx.com/openApi/spot/v1/ticker/24hr"
 
 CACHE_TTL = 30
 WS_INTERVAL = 3
-RATE_LIMIT_MAX = 30
+RATE_LIMIT_MAX = 50
 RATE_LIMIT_WINDOW = 60
 MAX_WS_CLIENTS = 100
 
@@ -42,187 +46,307 @@ async def fetch_json(url: str, headers: Optional[Dict] = None, params: Optional[
         async with http_session.get(url, headers=headers, params=params, timeout=aiohttp.ClientTimeout(total=timeout)) as r:
             text = await r.text()
             if r.status == 429:
-                print(f"[FETCH] RATE LIMITED: {url[:80]}")
                 return {"_error": "rate_limited", "status": r.status}
+            if r.status == 451:
+                return {"_error": "blocked", "status": r.status}
             if r.status == 404:
                 return {"_error": "not_found", "status": r.status}
             if r.status != 200:
-                print(f"[FETCH] HTTP {r.status}: {text[:200]}")
                 return {"_error": "http_error", "status": r.status, "body": text[:200]}
             return json.loads(text)
     except asyncio.TimeoutError:
-        print(f"[FETCH] TIMEOUT: {url[:80]}")
         return {"_error": "timeout"}
     except Exception as e:
-        print(f"[FETCH] ERROR: {type(e).__name__}: {str(e)[:100]}")
         return {"_error": "exception", "message": str(e)[:100]}
 
 # ═══════════════════════════════════════════════════════════════
-#  SOURCE 1: BYBIT (EXCHANGE - PRIMARY)
+#  EXCHANGE FETCHERS
 # ═══════════════════════════════════════════════════════════════
+
 async def fetch_bybit() -> tuple:
-    """Bybit is PRIMARY - this is the price you actually trade"""
+    """Bybit - Primary exchange"""
     data = await fetch_json(BYBIT_TICKERS, timeout=15)
-    
     if isinstance(data, dict) and data.get("_error"):
-        print(f"[BYBIT] FAILED: {data.get('_error')}")
         return [], {}
     if not isinstance(data, dict):
-        print(f"[BYBIT] FAILED: invalid response type {type(data)}")
-        return [], {}
-    
-    result = data.get("result", {})
-    tickers = result.get("list", [])
-    if not isinstance(tickers, list):
-        print(f"[BYBIT] FAILED: no tickers list")
         return [], {}
 
-    bybit_list = []
-    bybit_map = {}
+    tickers = data.get("result", {}).get("list", [])
+    result = []
+    result_map = {}
     for t in tickers:
         if not isinstance(t, dict):
             continue
-        raw_symbol = t.get("symbol", "")
-        if not raw_symbol.endswith("USDT"):
+        raw = t.get("symbol", "")
+        if not raw.endswith("USDT"):
             continue
-        symbol = raw_symbol[:-4].upper()
-        if not symbol or len(symbol) > 10:
-            continue
+        sym = raw[:-4].upper()
         price = float(t.get("lastPrice") or 0)
         if price <= 0:
             continue
-        change = float(t.get("price24hPcnt") or 0) * 100
         high = float(t.get("highPrice24h") or 0)
         low = float(t.get("lowPrice24h") or 0)
-        volume = float(t.get("turnover24h") or 0)
-        
         coin = {
-            "symbol": symbol,
-            "name": symbol,
-            "price": price,
+            "symbol": sym, "name": sym, "price": price,
+            "change": float(t.get("price24hPcnt") or 0) * 100,
+            "volume": float(t.get("turnover24h") or 0),
+            "market_cap": 0,
+            "high_24h": high if high > 0 else price * 1.02,
+            "low_24h": low if low > 0 else price * 0.98,
+            "source": "bybit", "price_confidence": "exchange"
+        }
+        result.append(coin)
+        result_map[sym] = coin
+    print(f"[BYBIT] {len(result)} tickers")
+    return result, result_map
+
+async def fetch_binance() -> tuple:
+    """Binance - Backup exchange #1"""
+    data = await fetch_json(BINANCE_TICKERS, timeout=15)
+    if isinstance(data, dict) and data.get("_error"):
+        return [], {}
+    if not isinstance(data, list):
+        return [], {}
+
+    result = []
+    result_map = {}
+    for t in data:
+        if not isinstance(t, dict):
+            continue
+        raw = t.get("symbol", "")
+        if not raw.endswith("USDT"):
+            continue
+        sym = raw[:-4].upper()
+        price = float(t.get("lastPrice") or 0)
+        if price <= 0:
+            continue
+        high = float(t.get("highPrice") or 0)
+        low = float(t.get("lowPrice") or 0)
+        coin = {
+            "symbol": sym, "name": sym, "price": price,
+            "change": float(t.get("priceChangePercent") or 0),
+            "volume": float(t.get("quoteVolume") or 0),
+            "market_cap": 0,
+            "high_24h": high if high > 0 else price * 1.02,
+            "low_24h": low if low > 0 else price * 0.98,
+            "source": "binance", "price_confidence": "exchange"
+        }
+        result.append(coin)
+        result_map[sym] = coin
+    print(f"[BINANCE] {len(result)} tickers")
+    return result, result_map
+
+async def fetch_okx() -> tuple:
+    """OKX - Backup exchange #2"""
+    data = await fetch_json(OKX_TICKERS, timeout=15)
+    if isinstance(data, dict) and data.get("_error"):
+        return [], {}
+    if not isinstance(data, dict):
+        return [], {}
+
+    tickers = data.get("data", [])
+    result = []
+    result_map = {}
+    for t in tickers:
+        if not isinstance(t, dict):
+            continue
+        raw = t.get("instId", "")
+        if not raw.endswith("-USDT"):
+            continue
+        sym = raw[:-5].upper()
+        price = float(t.get("last") or 0)
+        if price <= 0:
+            continue
+        high = float(t.get("high24h") or 0)
+        low = float(t.get("low24h") or 0)
+        coin = {
+            "symbol": sym, "name": sym, "price": price,
+            "change": float(t.get("change24h") or 0) * 100,
+            "volume": float(t.get("volCcy24h") or 0) * price,
+            "market_cap": 0,
+            "high_24h": high if high > 0 else price * 1.02,
+            "low_24h": low if low > 0 else price * 0.98,
+            "source": "okx", "price_confidence": "exchange"
+        }
+        result.append(coin)
+        result_map[sym] = coin
+    print(f"[OKX] {len(result)} tickers")
+    return result, result_map
+
+async def fetch_mexc() -> tuple:
+    """MEXC - Backup exchange #3"""
+    data = await fetch_json(MEXC_TICKERS, timeout=15)
+    if isinstance(data, dict) and data.get("_error"):
+        return [], {}
+    if not isinstance(data, list):
+        return [], {}
+
+    result = []
+    result_map = {}
+    for t in data:
+        if not isinstance(t, dict):
+            continue
+        raw = t.get("symbol", "")
+        if not raw.endswith("USDT"):
+            continue
+        sym = raw[:-4].upper()
+        price = float(t.get("lastPrice") or 0)
+        if price <= 0:
+            continue
+        high = float(t.get("highPrice") or 0)
+        low = float(t.get("lowPrice") or 0)
+        coin = {
+            "symbol": sym, "name": sym, "price": price,
+            "change": float(t.get("priceChangePercent") or 0),
+            "volume": float(t.get("quoteVolume") or 0),
+            "market_cap": 0,
+            "high_24h": high if high > 0 else price * 1.02,
+            "low_24h": low if low > 0 else price * 0.98,
+            "source": "mexc", "price_confidence": "exchange"
+        }
+        result.append(coin)
+        result_map[sym] = coin
+    print(f"[MEXC] {len(result)} tickers")
+    return result, result_map
+
+async def fetch_bingx() -> tuple:
+    """BingX - Backup exchange #4"""
+    data = await fetch_json(BINGX_TICKERS, timeout=15)
+    if isinstance(data, dict) and data.get("_error"):
+        return [], {}
+    if not isinstance(data, dict):
+        return [], {}
+
+    tickers = data.get("data", [])
+    if not isinstance(tickers, list):
+        # Try alternative structure
+        tickers = data if isinstance(data, list) else []
+
+    result = []
+    result_map = {}
+    for t in tickers:
+        if not isinstance(t, dict):
+            continue
+        raw = t.get("symbol", "")
+        if not raw or "USDT" not in raw:
+            continue
+        sym = raw.replace("-USDT", "").replace("USDT", "").upper()
+        if not sym or len(sym) > 10:
+            continue
+        price = float(t.get("lastPrice") or t.get("last") or 0)
+        if price <= 0:
+            continue
+        high = float(t.get("highPrice") or t.get("high24h") or 0)
+        low = float(t.get("lowPrice") or t.get("low24h") or 0)
+        change = float(t.get("priceChangePercent") or t.get("priceChange") or 0)
+        volume = float(t.get("quoteVolume") or t.get("volume") or 0)
+        coin = {
+            "symbol": sym, "name": sym, "price": price,
             "change": change,
             "volume": volume,
             "market_cap": 0,
             "high_24h": high if high > 0 else price * 1.02,
             "low_24h": low if low > 0 else price * 0.98,
-            "source": "bybit",
-            "price_confidence": "exchange"
+            "source": "bingx", "price_confidence": "exchange"
         }
-        bybit_list.append(coin)
-        bybit_map[symbol] = coin
-    print(f"[BYBIT] SUCCESS: {len(bybit_list)} tickers")
-    return bybit_list, bybit_map
+        result.append(coin)
+        result_map[sym] = coin
+    print(f"[BINGX] {len(result)} tickers")
+    return result, result_map
 
 # ═══════════════════════════════════════════════════════════════
-#  SOURCE 2: COINGECKO
+#  AGGREGATOR FETCHERS
 # ═══════════════════════════════════════════════════════════════
+
 async def fetch_coingecko() -> tuple:
     params = {
-        "vs_currency": "usd",
-        "order": "market_cap_desc",
-        "per_page": 250,
-        "page": 1,
-        "sparkline": "false",
+        "vs_currency": "usd", "order": "market_cap_desc",
+        "per_page": 250, "page": 1, "sparkline": "false",
         "price_change_percentage": "24h"
     }
     data = await fetch_json(COINGECKO_MARKETS, params=params, timeout=20)
-    
     if isinstance(data, dict) and data.get("_error"):
-        print(f"[COINGECKO] FAILED: {data.get('_error')}")
         return [], {}
     if not isinstance(data, list):
-        print(f"[COINGECKO] FAILED: invalid response type {type(data)}")
         return [], {}
-    
+
     result = []
     id_map = {}
     for coin in data:
         if not isinstance(coin, dict):
             continue
-        symbol = coin.get("symbol", "").upper()
-        cg_id = coin.get("id")
+        sym = coin.get("symbol", "").upper()
         result.append({
-            "symbol": symbol,
-            "name": coin.get("name"),
+            "symbol": sym, "name": coin.get("name"),
             "price": float(coin.get("current_price") or 0),
             "change": float(coin.get("price_change_percentage_24h") or 0),
             "volume": float(coin.get("total_volume") or 0),
             "market_cap": float(coin.get("market_cap") or 0),
             "high_24h": float(coin.get("high_24h") or 0),
             "low_24h": float(coin.get("low_24h") or 0),
-            "source": "coingecko",
-            "price_confidence": "aggregator"
+            "source": "coingecko", "price_confidence": "aggregator"
         })
-        if cg_id:
-            id_map[symbol] = cg_id
-    print(f"[COINGECKO] SUCCESS: {len(result)} coins")
+        if coin.get("id"):
+            id_map[sym] = coin["id"]
+    print(f"[COINGECKO] {len(result)} coins")
     return result, id_map
 
-# ═══════════════════════════════════════════════════════════════
-#  SOURCE 3: COINPAPRIKA (BACKUP)
-# ═══════════════════════════════════════════════════════════════
 async def fetch_coinpaprika() -> List[Dict]:
     data = await fetch_json(COINPAPRIKA_TICKERS, timeout=20)
-    
     if isinstance(data, dict) and data.get("_error"):
-        print(f"[COINPAPRIKA] FAILED: {data.get('_error')}")
         return []
     if not isinstance(data, list):
-        print(f"[COINPAPRIKA] FAILED: invalid response type {type(data)}")
         return []
-    
+
     result = []
     for coin in data[:250]:
         if not isinstance(coin, dict):
             continue
-        quotes = coin.get("quotes", {})
-        usd = quotes.get("USD", {})
+        usd = coin.get("quotes", {}).get("USD", {})
         if not usd:
             continue
-        symbol = coin.get("symbol", "").upper()
+        sym = coin.get("symbol", "").upper()
         price = float(usd.get("price") or 0)
         change = float(usd.get("percent_change_24h") or 0)
-        
-        estimated_high = price * (1 + abs(change) / 100 * 0.6) if price > 0 else 0
-        estimated_low = price * (1 - abs(change) / 100 * 0.6) if price > 0 else 0
-        
         result.append({
-            "symbol": symbol,
-            "name": coin.get("name"),
-            "price": price,
-            "change": change,
+            "symbol": sym, "name": coin.get("name"),
+            "price": price, "change": change,
             "volume": float(usd.get("volume_24h") or 0),
             "market_cap": float(usd.get("market_cap") or 0),
-            "high_24h": estimated_high,
-            "low_24h": estimated_low,
-            "source": "coinpaprika",
-            "price_confidence": "backup"
+            "high_24h": price * (1 + abs(change) / 100 * 0.6) if price > 0 else 0,
+            "low_24h": price * (1 - abs(change) / 100 * 0.6) if price > 0 else 0,
+            "source": "coinpaprika", "price_confidence": "backup"
         })
-    print(f"[COINPAPRIKA] SUCCESS: {len(result)} coins")
+    print(f"[COINPAPRIKA] {len(result)} coins")
     return result
 
 # ═══════════════════════════════════════════════════════════════
-#  MERGE SOURCES (TRADING-FIRST)
+#  MERGE - EXCHANGE FIRST
 # ═══════════════════════════════════════════════════════════════
-def merge_sources(bb_data: List[Dict], bb_map: Dict, cg_data: List[Dict], cg_id_map: Dict, cp_data: List[Dict]) -> tuple:
+def merge_all(exchanges: List[tuple], cg_data: List[Dict], cg_id_map: Dict, cp_data: List[Dict]) -> tuple:
     merged = {}
     id_map = {}
     source_log = []
-    
-    # 1. Bybit (exchange) = PRIMARY price
-    for coin in bb_data:
-        sym = coin["symbol"]
-        merged[sym] = coin.copy()
-    if bb_data:
-        source_log.append(f"bybit:{len(bb_data)}")
-    
-    # 2. CoinGecko adds metadata + fills coins not on Bybit
+
+    # 1. Add exchange data in priority order
+    exchange_sources = ["bybit", "binance", "okx", "mexc", "bingx"]
+    for i, (ex_data, ex_map) in enumerate(exchanges):
+        src = exchange_sources[i] if i < len(exchange_sources) else f"ex{i}"
+        added = 0
+        for coin in ex_data:
+            sym = coin["symbol"]
+            if sym not in merged:
+                merged[sym] = coin.copy()
+                added += 1
+        if ex_data:
+            source_log.append(f"{src}:{len(ex_data)}(+{added})")
+
+    # 2. CoinGecko adds metadata + missing coins
     cg_added = 0
     for coin in cg_data:
         sym = coin["symbol"]
         if cg_id_map.get(sym):
             id_map[sym] = cg_id_map[sym]
-        
         if sym not in merged:
             merged[sym] = coin.copy()
             cg_added += 1
@@ -231,16 +355,14 @@ def merge_sources(bb_data: List[Dict], bb_map: Dict, cg_data: List[Dict], cg_id_
                 merged[sym]["name"] = coin["name"]
             if coin.get("market_cap", 0) > 0:
                 merged[sym]["market_cap"] = coin["market_cap"]
-            if coin.get("volume", 0) > 0 and merged[sym].get("volume", 0) == 0:
-                merged[sym]["volume"] = coin["volume"]
             if merged[sym].get("high_24h", 0) == 0 and coin.get("high_24h", 0) > 0:
                 merged[sym]["high_24h"] = coin["high_24h"]
             if merged[sym].get("low_24h", 0) == 0 and coin.get("low_24h", 0) > 0:
                 merged[sym]["low_24h"] = coin["low_24h"]
     if cg_data:
-        source_log.append(f"cg:{len(cg_data)}(added{cg_added})")
-    
-    # 3. CoinPaprika - only for coins missing from both
+        source_log.append(f"cg:{len(cg_data)}(+{cg_added})")
+
+    # 3. CoinPaprika fills remaining gaps
     cp_added = 0
     for coin in cp_data:
         sym = coin["symbol"]
@@ -248,26 +370,26 @@ def merge_sources(bb_data: List[Dict], bb_map: Dict, cg_data: List[Dict], cg_id_
             merged[sym] = coin.copy()
             cp_added += 1
     if cp_data:
-        source_log.append(f"cp:{len(cp_data)}(added{cp_added})")
-    
-    # 4. Final safety: ensure no zero high/low
-    fixed_count = 0
-    for sym, coin in merged.items():
+        source_log.append(f"cp:{len(cp_data)}(+{cp_added})")
+
+    # 4. Safety: ensure all have high/low
+    fixed = 0
+    for coin in merged.values():
         price = coin.get("price", 0)
         change = coin.get("change", 0)
         if price > 0:
             if coin.get("high_24h", 0) == 0:
                 coin["high_24h"] = price * (1 + abs(change) / 100 * 0.5)
-                fixed_count += 1
+                fixed += 1
             if coin.get("low_24h", 0) == 0:
                 coin["low_24h"] = price * (1 - abs(change) / 100 * 0.5)
-                fixed_count += 1
+                fixed += 1
             if coin["high_24h"] <= coin["low_24h"]:
                 coin["high_24h"] = price * 1.01
                 coin["low_24h"] = price * 0.99
-    if fixed_count > 0:
-        source_log.append(f"fixed:{fixed_count}")
-    
+    if fixed > 0:
+        source_log.append(f"fixed:{fixed}")
+
     result = list(merged.values())
     result.sort(key=lambda x: (x.get("price_confidence") == "exchange", x.get("volume", 0)), reverse=True)
     return result, id_map, source_log
@@ -277,53 +399,67 @@ def merge_sources(bb_data: List[Dict], bb_map: Dict, cg_data: List[Dict], cg_id_
 # ═══════════════════════════════════════════════════════════════
 async def build_cache():
     global cache
-    
-    print("[BUILD] Starting multi-source fetch...")
-    bb_task = asyncio.create_task(fetch_bybit())
-    cg_task = asyncio.create_task(fetch_coingecko())
-    cp_task = asyncio.create_task(fetch_coinpaprika())
-    
-    bb_result, cg_result, cp_result = await asyncio.gather(
-        bb_task, cg_task, cp_task, return_exceptions=True
-    )
-    
-    if isinstance(bb_result, Exception):
-        print(f"[BYBIT] EXCEPTION: {bb_result}")
-        bb_data, bb_map = [], {}
-    else:
-        bb_data = bb_result[0] if isinstance(bb_result, tuple) else []
-        bb_map = bb_result[1] if isinstance(bb_result, tuple) and len(bb_result) > 1 else {}
-    
+
+    print("[BUILD] Fetching from 7 sources...")
+
+    tasks = [
+        asyncio.create_task(fetch_bybit()),
+        asyncio.create_task(fetch_binance()),
+        asyncio.create_task(fetch_okx()),
+        asyncio.create_task(fetch_mexc()),
+        asyncio.create_task(fetch_bingx()),
+        asyncio.create_task(fetch_coingecko()),
+        asyncio.create_task(fetch_coinpaprika()),
+    ]
+
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    exchanges = []
+    for i, r in enumerate(results[:5]):
+        names = ["bybit", "binance", "okx", "mexc", "bingx"]
+        if isinstance(r, Exception):
+            print(f"[{names[i].upper()}] EXCEPTION: {r}")
+            exchanges.append(([], {}))
+        elif isinstance(r, tuple) and len(r) == 2:
+            exchanges.append(r)
+        else:
+            exchanges.append(([], {}))
+
+    cg_result = results[5]
     if isinstance(cg_result, Exception):
         print(f"[COINGECKO] EXCEPTION: {cg_result}")
         cg_data, cg_id_map = [], {}
+    elif isinstance(cg_result, tuple) and len(cg_result) == 2:
+        cg_data, cg_id_map = cg_result
     else:
-        cg_data = cg_result[0] if isinstance(cg_result, tuple) else []
-        cg_id_map = cg_result[1] if isinstance(cg_result, tuple) and len(cg_result) > 1 else {}
-    
+        cg_data, cg_id_map = [], {}
+
+    cp_result = results[6]
     if isinstance(cp_result, Exception):
         print(f"[COINPAPRIKA] EXCEPTION: {cp_result}")
         cp_data = []
+    elif isinstance(cp_result, list):
+        cp_data = cp_result
     else:
-        cp_data = cp_result if isinstance(cp_result, list) else []
-    
-    if not bb_data and not cg_data and not cp_data:
-        print("[CACHE] ALL SOURCES FAILED - keeping old cache if available")
+        cp_data = []
+
+    if not any(ex[0] for ex in exchanges) and not cg_data and not cp_data:
+        print("[CACHE] ALL SOURCES FAILED")
         if not cache["all"]:
             cache["ready"] = True
         return
-    
-    merged, id_map, source_log = merge_sources(bb_data, bb_map, cg_data, cg_id_map, cp_data)
-    
+
+    merged, id_map, source_log = merge_all(exchanges, cg_data, cg_id_map, cp_data)
+
     cache["all"] = merged
     cache["hot"] = merged[:100]
     cache["id_map"] = id_map
     cache["ready"] = True
     cache["last_update"] = time.time()
     cache["source_log"] = source_log
-    
-    exchange_count = sum(1 for c in merged if c.get("price_confidence") == "exchange")
-    print(f"[CACHE] Built: {len(merged)} symbols | {exchange_count} exchange | {len(merged)-exchange_count} aggregator | log: {source_log}")
+
+    ex_count = sum(1 for c in merged if c.get("price_confidence") == "exchange")
+    print(f"[CACHE] {len(merged)} symbols | {ex_count} exchange | {len(merged)-ex_count} other | {source_log}")
 
 # ═══════════════════════════════════════════════════════════════
 #  BACKGROUND
@@ -373,7 +509,7 @@ def check_rate_limit(ip):
 async def lifespan(app: FastAPI):
     global http_session
     http_session = aiohttp.ClientSession()
-    print(f"[STARTUP] Phoenix Trading Backend v6 - Exchange-First Priority")
+    print(f"[STARTUP] Phoenix v7 - Multi-Exchange + BingX")
     tasks = [
         asyncio.create_task(background_fetcher()),
         asyncio.create_task(ws_broadcaster())
@@ -397,148 +533,24 @@ app.add_middleware(
 # ═══════════════════════════════════════════════════════════════
 @app.get("/")
 async def home():
-    exchange_count = sum(1 for c in cache["all"] if c.get("price_confidence") == "exchange")
+    ex_count = sum(1 for c in cache["all"] if c.get("price_confidence") == "exchange")
     return {
-        "status": "running",
-        "version": "v6",
+        "status": "running", "version": "v7",
         "symbols": len(cache["all"]),
-        "exchange_prices": exchange_count,
-        "aggregator_prices": len(cache["all"]) - exchange_count,
-        "sources": ["bybit", "coingecko", "coinpaprika"],
-        "priority": "exchange-first",
+        "exchange_prices": ex_count,
+        "aggregator_prices": len(cache["all"]) - ex_count,
+        "sources": ["bybit", "binance", "okx", "mexc", "bingx", "coingecko", "coinpaprika"],
         "source_log": cache.get("source_log", []),
         "cache_age": int(time.time() - cache.get("last_update", 0))
     }
 
 @app.get("/health")
 async def health():
-    exchange_count = sum(1 for c in cache["all"] if c.get("price_confidence") == "exchange")
+    ex_count = sum(1 for c in cache["all"] if c.get("price_confidence") == "exchange")
     return {
-        "status": "ok",
-        "version": "v6",
+        "status": "ok", "version": "v7",
         "cache_ready": cache["ready"],
         "symbols": len(cache["all"]),
-        "exchange_prices": exchange_count,
+        "exchange_prices": ex_count,
         "ws_clients": len(ws_clients),
-        "sources": ["bybit", "coingecko", "coinpaprika"],
-        "priority": "exchange-first",
-        "source_log": cache.get("source_log", []),
-        "cache_age_seconds": int(time.time() - cache.get("last_update", 0))
-    }
-
-@app.get("/symbols")
-async def symbols(request: Request):
-    if not check_rate_limit(request.client.host):
-        raise HTTPException(429, "Rate limit")
-    if not cache["ready"]:
-        await build_cache()
-    return cache["all"]
-
-@app.get("/candles/{symbol}")
-async def candles(symbol: str, request: Request, days: str = "7"):
-    if not check_rate_limit(request.client.host):
-        raise HTTPException(429, "Rate limit")
-
-    symbol_upper = symbol.upper()
-    coin_id = cache.get("id_map", {}).get(symbol_upper)
-
-    if not coin_id:
-        return generate_demo_candles(symbol_upper)
-
-    url = COINGECKO_CHART.format(id=coin_id)
-    params = {"vs_currency": "usd", "days": days}
-
-    data = await fetch_json(url, params=params, timeout=20)
-
-    if not data or not isinstance(data, dict) or data.get("_error"):
-        return generate_demo_candles(symbol_upper)
-
-    prices = data.get("prices", [])
-    if not prices or len(prices) < 10:
-        return generate_demo_candles(symbol_upper)
-
-    total_points = len(prices)
-    candles_per_agg = max(1, total_points // 100)
-
-    candles = []
-    bucket = []
-    bucket_start = None
-
-    for ts, price in prices:
-        if bucket_start is None:
-            bucket_start = ts
-        bucket.append((ts, price))
-        if len(bucket) >= candles_per_agg:
-            opens = [p for _, p in bucket]
-            candles.append({
-                "time": bucket_start,
-                "open": opens[0],
-                "high": max(p for _, p in bucket),
-                "low": min(p for _, p in bucket),
-                "close": opens[-1]
-            })
-            bucket_start = None
-            bucket = []
-
-    if bucket:
-        opens = [p for _, p in bucket]
-        candles.append({
-            "time": bucket_start,
-            "open": opens[0],
-            "high": max(p for _, p in bucket),
-            "low": min(p for _, p in bucket),
-            "close": opens[-1]
-        })
-
-    return candles
-
-def generate_demo_candles(symbol="BTC"):
-    seed = sum(ord(c) for c in symbol)
-    rng = random.Random(seed)
-    now = int(time.time() * 1000)
-    base_price = 50000 + rng.random() * 50000
-    if symbol == "BTC": base_price = 63900
-    elif symbol == "ETH": base_price = 3450
-    elif symbol == "SOL": base_price = 145
-    
-    candles = []
-    for i in range(100):
-        ts = now - (100 - i) * 3600 * 1000
-        change = (rng.random() - 0.48) * 0.02
-        open_p = base_price
-        close_p = base_price * (1 + change)
-        high_p = max(open_p, close_p) * (1 + rng.random() * 0.005)
-        low_p = min(open_p, close_p) * (1 - rng.random() * 0.005)
-        candles.append({
-            "time": ts,
-            "open": round(open_p, 2),
-            "high": round(high_p, 2),
-            "low": round(low_p, 2),
-            "close": round(close_p, 2)
-        })
-        base_price = close_p
-    return candles
-
-@app.websocket("/ws")
-async def ws_endpoint(ws: WebSocket):
-    if len(ws_clients) >= MAX_WS_CLIENTS:
-        await ws.close(code=1008)
-        return
-    await ws.accept()
-    ws_clients.add(ws)
-    if cache["ready"]:
-        await ws.send_json({
-            "type": "hot",
-            "data": cache["hot"],
-            "timestamp": int(time.time() * 1000)
-        })
-    try:
-        while True:
-            msg = await asyncio.wait_for(ws.receive_text(), timeout=30)
-            if msg == "ping":
-                await ws.send_json({"type": "pong"})
-    except (WebSocketDisconnect, asyncio.TimeoutError):
-        pass
-    finally:
-        ws_clients.discard(ws)
-                            
+        "sourc
