@@ -172,33 +172,32 @@ def calculate_ema(prices: List[float], period: int) -> List[float]:
     return [sma] * (period - 1) + ema
 
 def calculate_rsi(prices: List[float], period: int = 14) -> List[float]:
-    """Calculate Relative Strength Index."""
     if len(prices) < period + 1:
         return [50.0] * len(prices)
-    
-    deltas = [prices[i] - prices[i-1] for i in range(1, len(prices))]
-    gains = [max(d, 0) for d in deltas]
-    losses = [abs(min(d, 0)) for d in deltas]
-    
+
+    gains, losses = [], []
+
+    for i in range(1, len(prices)):
+        change = prices[i] - prices[i - 1]
+        gains.append(max(change, 0))
+        losses.append(abs(min(change, 0)))
+
     avg_gain = sum(gains[:period]) / period
     avg_loss = sum(losses[:period]) / period
-    
-    rsi_values = []
-    
-    for i in range(period):
-        rsi_values.append(50.0)  # Neutral before enough data
-    
-    for i in range(period, len(deltas)):
+
+    rsi = [50.0] * period
+
+    for i in range(period, len(gains)):
         avg_gain = (avg_gain * (period - 1) + gains[i]) / period
         avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-        
+
         if avg_loss == 0:
-            rsi_values.append(100.0)
+            rsi.append(100.0)
         else:
             rs = avg_gain / avg_loss
-            rsi_values.append(100.0 - (100.0 / (1 + rs)))
-    
-    return rsi_values
+            rsi.append(100 - (100 / (1 + rs)))
+
+    return rsi
 
 def calculate_atr(candles: List[Dict], period: int = 14) -> List[float]:
     """Calculate Average True Range for volatility."""
@@ -230,22 +229,23 @@ def calculate_atr(candles: List[Dict], period: int = 14) -> List[float]:
     return [first_atr] * period + atr[1:]
 
 def calculate_volume_profile(candles: List[Dict]) -> Dict:
-    """Analyze volume distribution."""
-    if not candles:
+    if len(candles) < 5:
         return {"avg_volume": 0, "volume_trend": "neutral", "volume_spike": False}
-    
-    volumes = [abs(c["close"] - c["open"]) for c in candles]  # Proxy for volume
+
+    volumes = []
+    for c in candles:
+        body = abs(c["close"] - c["open"])
+        range_size = c["high"] - c["low"]
+        volumes.append(body + (range_size * 0.5))
+
     avg_vol = sum(volumes) / len(volumes)
-    recent_vol = sum(volumes[-5:]) / 5 if len(volumes) >= 5 else avg_vol
-    
-    volume_trend = "increasing" if recent_vol > avg_vol * 1.2 else "decreasing" if recent_vol < avg_vol * 0.8 else "neutral"
-    volume_spike = recent_vol > avg_vol * 2.0
-    
+    recent = sum(volumes[-5:]) / 5
+
     return {
-        "avg_volume": round(avg_vol, 4),
-        "volume_trend": volume_trend,
-        "volume_spike": volume_spike
-    }
+        "avg_volume": round(avg_vol, 6),
+        "volume_trend": "increasing" if recent > avg_vol * 1.2 else "decreasing" if recent < avg_vol * 0.8 else "neutral",
+        "volume_spike": recent > avg_vol * 2
+}
 
 def find_support_resistance(candles: List[Dict], lookback: int = 20) -> Tuple[List[float], List[float]]:
     """Find support and resistance levels from recent pivots."""
