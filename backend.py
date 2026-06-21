@@ -1047,10 +1047,33 @@ async def trending(request: Request):
     if not check_rate_limit(request.client.host):
         raise HTTPException(429, "Rate limit")
     
-    if not analysis_cache["ready"]:
-        return {"status": "not_ready", "data": []}
+    # If cache not ready, try to build it quickly or return what we have
+    if not analysis_cache["ready"] or not analysis_cache["data"]:
+        # Try to analyze top 10 on-demand for quick response
+        quick_results = []
+        if cache["ready"] and cache["hot"]:
+            for token in cache["hot"][:10]:
+                try:
+                    quick_results.append(await analyze_symbol(token["symbol"]))
+                except Exception as e:
+                    print(f"[TRENDING QUICK] {token['symbol']}: {e}")
+        
+        if quick_results:
+            sorted_results = sorted(
+                quick_results,
+                key=lambda x: x.get("market_score", {}).get("score", 0),
+                reverse=True
+            )
+            return {
+                "status": "partial",
+                "message": "Full analysis cache still building",
+                "count": len(sorted_results),
+                "data": sorted_results
+            }
+        
+        return {"status": "not_ready", "message": "Analysis cache building, try again in 30s", "data": []}
     
-    # Sort by market score descending
+    # Normal cached response
     sorted_analysis = sorted(
         analysis_cache["data"].values(),
         key=lambda x: x.get("market_score", {}).get("score", 0),
@@ -1062,6 +1085,75 @@ async def trending(request: Request):
         "count": len(sorted_analysis),
         "data": sorted_analysis[:20]
     }
+
+@app.get("/market-summary")
+async def market_summary(request: Request):
+    """Overall market health summary."""
+    if not check_rate_limit(request.client.host):
+        raise HTTPException(429, "Rate limit")
+    
+    # If cache not ready, compute quick summary from hot symbols
+    if not analysis_cache["ready"] or not analysis_cache["data"]:
+        quick_data = []
+        if cache["ready"] and cache["hot"]:
+            for token in cache["hot"][:20]:
+                try:
+                    quick_data.append(await analyze_symbol(token["symbol"]))
+                except:
+                    pass
+        
+        if quick_data:
+            bullish = sum(1 for d in quick_data if d.get("trend", {}).get("direction") == "bullish")
+            bearish = sum(1 for d in quick_data if d.get("trend", {}).get("direction") == "bearish")
+            neutral = sum(1 for d in quick_data if d.get("trend", {}).get("direction") == "neutral")
+            avg_score = sum(d.get("market_score", {}).get("score", 50) for d in quick_data) / len(quick_data)
+            
+            return {
+                "status": "partial",
+                "message": "Full analysis cache still building",
+                "total_analyzed": len(quick_data),
+                "trend_distribution": {"bullish": bullish, "bearish": bearish, "neutral": neutral},
+                "average_market_score": round(avg_score, 2),
+                "top_bullish": sorted(
+                    [d for d in quick_data if d.get("trend", {}).get("direction") == "bullish"],
+                    key=lambda x: x.get("market_score", {}).get("score", 0),
+                    reverse=True
+                )[:3],
+                "top_bearish": sorted(
+                    [d for d in quick_data if d.get("trend", {}).get("direction") == "bearish"],
+                    key=lambda x: x.get("market_score", {}).get("score", 0),
+                    reverse=True
+                )[:3]
+            }
+        
+        return {"status": "not_ready", "message": "Analysis cache building, try again in 30s"}
+    
+    # Normal cached response
+    data = analysis_cache["data"].values()
+    
+    bullish = sum(1 for d in data if d.get("trend", {}).get("direction") == "bullish")
+    bearish = sum(1 for d in data if d.get("trend", {}).get("direction") == "bearish")
+    neutral = sum(1 for d in data if d.get("trend", {}).get("direction") == "neutral")
+    
+    avg_score = sum(d.get("market_score", {}).get("score", 50) for d in data) / len(data) if data else 50
+    
+    return {
+        "status": "ok",
+        "total_analyzed": len(data),
+        "trend_distribution": {"bullish": bullish, "bearish": bearish, "neutral": neutral},
+        "average_market_score": round(avg_score, 2),
+        "top_bullish": sorted(
+            [d for d in data if d.get("trend", {}).get("direction") == "bullish"],
+            key=lambda x: x.get("market_score", {}).get("score", 0),
+            reverse=True
+        )[:5],
+        "top_bearish": sorted(
+            [d for d in data if d.get("trend", {}).get("direction") == "bearish"],
+            key=lambda x: x.get("market_score", {}).get("score", 0),
+            reverse=True
+        )[:5]
+    }
+
 
 @app.get("/market-summary")
 async def market_summary(request: Request):
