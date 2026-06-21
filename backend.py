@@ -57,6 +57,7 @@ async def fetch_json(url, headers=None, params=None, timeout=15):
 async def fetch_bybit():
     data = await fetch_json(BYBIT_TICKERS, timeout=15)
     if isinstance(data, dict) and data.get("_error"):
+        print(f"[BYBIT] ERROR: {data.get('_error')} status={data.get('status')}")
         return [], {}
     if not isinstance(data, dict):
         return [], {}
@@ -92,6 +93,7 @@ async def fetch_bybit():
 async def fetch_binance():
     data = await fetch_json(BINANCE_TICKERS, timeout=15)
     if isinstance(data, dict) and data.get("_error"):
+        print(f"[BINANCE] ERROR: {data.get('_error')} status={data.get('status')}")
         return [], {}
     if not isinstance(data, list):
         return [], {}
@@ -126,6 +128,7 @@ async def fetch_binance():
 async def fetch_okx():
     data = await fetch_json(OKX_TICKERS, timeout=15)
     if isinstance(data, dict) and data.get("_error"):
+        print(f"[OKX] ERROR: {data.get('_error')} status={data.get('status')}")
         return [], {}
     if not isinstance(data, dict):
         return [], {}
@@ -157,10 +160,10 @@ async def fetch_okx():
         result_map[sym] = coin
     print(f"[OKX] {len(result)} tickers")
     return result, result_map
-
 async def fetch_mexc():
     data = await fetch_json(MEXC_TICKERS, timeout=15)
     if isinstance(data, dict) and data.get("_error"):
+        print(f"[MEXC] ERROR: {data.get('_error')} status={data.get('status')}")
         return [], {}
     if not isinstance(data, list):
         return [], {}
@@ -195,6 +198,7 @@ async def fetch_mexc():
 async def fetch_bingx():
     data = await fetch_json(BINGX_TICKERS, timeout=15)
     if isinstance(data, dict) and data.get("_error"):
+        print(f"[BINGX] ERROR: {data.get('_error')} status={data.get('status')}")
         return [], {}
     if not isinstance(data, dict):
         return [], {}
@@ -217,13 +221,10 @@ async def fetch_bingx():
             continue
         high = float(t.get("highPrice") or t.get("high24h") or 0)
         low = float(t.get("lowPrice") or t.get("low24h") or 0)
-        
-        # FIX: BingX returns priceChangePercent with % sign
         change_raw = t.get("priceChangePercent") or t.get("priceChange") or 0
         if isinstance(change_raw, str):
             change_raw = change_raw.replace("%", "").strip()
         change = float(change_raw)
-        
         volume = float(t.get("quoteVolume") or t.get("volume") or 0)
         coin = {
             "symbol": sym, "name": sym, "price": price,
@@ -248,6 +249,7 @@ async def fetch_coingecko():
     }
     data = await fetch_json(COINGECKO_MARKETS, params=params, timeout=20)
     if isinstance(data, dict) and data.get("_error"):
+        print(f"[COINGECKO] ERROR: {data.get('_error')} status={data.get('status')}")
         return [], {}
     if not isinstance(data, list):
         return [], {}
@@ -275,6 +277,7 @@ async def fetch_coingecko():
 async def fetch_coinpaprika():
     data = await fetch_json(COINPAPRIKA_TICKERS, timeout=20)
     if isinstance(data, dict) and data.get("_error"):
+        print(f"[COINPAPRIKA] ERROR: {data.get('_error')} status={data.get('status')}")
         return []
     if not isinstance(data, list):
         return []
@@ -300,7 +303,7 @@ async def fetch_coinpaprika():
     print(f"[COINPAPRIKA] {len(result)} coins")
     return result
 
-# MERGE
+# MERGE - FIX: Preserve market_cap from aggregators
 async def merge_all(exchanges, cg_data, cg_id_map, cp_data):
     merged = {}
     id_map = {}
@@ -341,6 +344,9 @@ async def merge_all(exchanges, cg_data, cg_id_map, cp_data):
         if sym not in merged:
             merged[sym] = coin.copy()
             cp_added += 1
+        else:
+            if coin.get("market_cap", 0) > 0 and merged[sym].get("market_cap", 0) == 0:
+                merged[sym]["market_cap"] = coin["market_cap"]
     if cp_data:
         source_log.append(f"cp:{len(cp_data)}(+{cp_added})")
     fixed = 0
@@ -362,7 +368,6 @@ async def merge_all(exchanges, cg_data, cg_id_map, cp_data):
     result = list(merged.values())
     result.sort(key=lambda x: (x.get("price_confidence") == "exchange", x.get("volume", 0)), reverse=True)
     return result, id_map, source_log
-
 # BUILD CACHE
 async def build_cache():
     global cache
@@ -618,3 +623,4 @@ async def ws_endpoint(ws: WebSocket):
         pass
     finally:
         ws_clients.discard(ws)
+        
