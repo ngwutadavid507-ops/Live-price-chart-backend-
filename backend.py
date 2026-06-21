@@ -623,12 +623,3 @@ async def ws_endpoint(ws: WebSocket):
         pass
     finally:
         ws_clients.discard(ws)
-@app.get("/debug/bybit")
-async def debug_bybit():
-    url = "https://api.bybit.com/v5/market/tickers?category=spot"
-
-    async with http_session.get(url) as r:
-        return {
-            "status": r.status,
-            "text": await r.text()
-    }        
