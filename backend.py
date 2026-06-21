@@ -944,4 +944,178 @@ async def home():
             "aggregator_prices": len(cache.get("all", [])) - ex_count,
             "sources": ["bybit", "binance", "okx", "mexc", "bingx", "coingecko", "coinpaprika"],
             "source_log": cache.get("source_log", []),
-            "cache_age": int
+            "cache_age": int(time.time() - cache.get("last_update", 0)),
+            "analysis_ready": analysis_cache.get("ready", False),
+            "analysis_symbols": len(analysis_cache.get("data", {}))
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.get("/health")
+async def health():
+    try:
+        ex_count = sum(1 for c in cache.get("all", []) if c.get("price_confidence") == "exchange")
+        return {
+            "status": "ok", "version": "v8",
+            "cache_ready": cache.get("ready", False),
+            "symbols": len(cache.get("all", [])),
+            "exchange_prices": ex_count,
+            "ws_clients": len(ws_clients),
+            "source_log": cache.get("source_log", []),
+            "cache_age_seconds": int(time.time() - cache.get("last_update", 0)),
+            "analysis_ready": analysis_cache.get("ready", False),
+            "analysis_count": len(analysis_cache.get("data", {}))
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.get("/symbols")
+async def symbols(request: Request):
+    if not check_rate_limit(request.client.host):
+        raise HTTPException(429, "Rate limit")
+    if not cache["ready"]:
+        await build_cache()
+    return cache["all"]
+
+@app.get("/candles/{symbol}")
+async def candles(symbol: str, request: Request, days: str = "7"):
+    if not check_rate_limit(request.client.host):
+        raise HTTPException(429, "Rate limit")
+    symbol_upper = symbol.upper()
+    coin_id = cache.get("id_map", {}).get(symbol_upper)
+    if not coin_id:
+        return generate_demo_candles(symbol_upper)
+    url = COINGECKO_CHART.format(id=coin_id)
+    params = {"vs_currency": "usd", "days": days}
+    data = await fetch_json(url, params=params, timeout=20)
+    if not data or not isinstance(data, dict) or data.get("_error"):
+        return generate_demo_candles(symbol_upper)
+    prices = data.get("prices", [])
+    if not prices or len(prices) < 10:
+        return generate_demo_candles(symbol_upper)
+    total_points = len(prices)
+    candles_per_agg = max(1, total_points // 100)
+    candles = []
+    bucket = []
+    bucket_start = None
+    for ts, price in prices:
+        if bucket_start is None:
+            bucket_start = ts
+        bucket.append((ts, price))
+        if len(bucket) >= candles_per_agg:
+            opens = [p for _, p in bucket]
+            candles.append({
+                "time": bucket_start,
+                "open": opens[0],
+                "high": max(p for _, p in bucket),
+                "low": min(p for _, p in bucket),
+                "close": opens[-1]
+            })
+            bucket_start = None
+            bucket = []
+    if bucket:
+        opens = [p for _, p in bucket]
+        candles.append({
+            "time": bucket_start,
+            "open": opens[0],
+            "high": max(p for _, p in bucket),
+            "low": min(p for _, p in bucket),
+            "close": opens[-1]
+        })
+    return candles
+
+# ========== NEW PHASE 2 ENDPOINTS ==========
+
+@app.get("/analyze/{symbol}")
+async def analyze_endpoint(symbol: str, request: Request):
+    """Get pre-computed analysis for a symbol."""
+    if not check_rate_limit(request.client.host):
+        raise HTTPException(429, "Rate limit")
+    
+    symbol_upper = symbol.upper()
+    
+    # Return cached analysis if available
+    if analysis_cache["ready"] and symbol_upper in analysis_cache["data"]:
+        return analysis_cache["data"][symbol_upper]
+    
+    # Compute on-demand if not in cache
+    return await analyze_symbol(symbol_upper)
+
+@app.get("/trending")
+async def trending(request: Request):
+    """Get top trending coins by market score."""
+    if not check_rate_limit(request.client.host):
+        raise HTTPException(429, "Rate limit")
+    
+    if not analysis_cache["ready"]:
+        return {"status": "not_ready", "data": []}
+    
+    # Sort by market score descending
+    sorted_analysis = sorted(
+        analysis_cache["data"].values(),
+        key=lambda x: x.get("market_score", {}).get("score", 0),
+        reverse=True
+    )
+    
+    return {
+        "status": "ok",
+        "count": len(sorted_analysis),
+        "data": sorted_analysis[:20]
+    }
+
+@app.get("/market-summary")
+async def market_summary(request: Request):
+    """Overall market health summary."""
+    if not check_rate_limit(request.client.host):
+        raise HTTPException(429, "Rate limit")
+    
+    if not analysis_cache["ready"]:
+        return {"status": "not_ready"}
+    
+    data = analysis_cache["data"].values()
+    
+    bullish = sum(1 for d in data if d.get("trend", {}).get("direction") == "bullish")
+    bearish = sum(1 for d in data if d.get("trend", {}).get("direction") == "bearish")
+    neutral = sum(1 for d in data if d.get("trend", {}).get("direction") == "neutral")
+    
+    avg_score = sum(d.get("market_score", {}).get("score", 50) for d in data) / len(data) if data else 50
+    
+    return {
+        "status": "ok",
+        "total_analyzed": len(data),
+        "trend_distribution": {"bullish": bullish, "bearish": bearish, "neutral": neutral},
+        "average_market_score": round(avg_score, 2),
+        "top_bullish": sorted(
+            [d for d in data if d.get("trend", {}).get("direction") == "bullish"],
+            key=lambda x: x.get("market_score", {}).get("score", 0),
+            reverse=True
+        )[:5],
+        "top_bearish": sorted(
+            [d for d in data if d.get("trend", {}).get("direction") == "bearish"],
+            key=lambda x: x.get("market_score", {}).get("score", 0),
+            reverse=True
+        )[:5]
+    }
+
+@app.websocket("/ws")
+async def ws_endpoint(ws: WebSocket):
+    if len(ws_clients) >= MAX_WS_CLIENTS:
+        await ws.close(code=1008)
+        return
+    await ws.accept()
+    ws_clients.add(ws)
+    if cache["ready"]:
+        await ws.send_json({
+            "type": "hot",
+            "data": cache["hot"],
+            "timestamp": int(time.time() * 1000)
+        })
+    try:
+        while True:
+            msg = await asyncio.wait_for(ws.receive_text(), timeout=30)
+            if msg == "ping":
+                await ws.send_json({"type": "pong"})
+    except (WebSocketDisconnect, asyncio.TimeoutError):
+        pass
+    finally:
+        ws_clients.discard(ws)
