@@ -245,7 +245,7 @@ def calculate_volume_profile(candles: List[Dict]) -> Dict:
         "avg_volume": round(avg_vol, 6),
         "volume_trend": "increasing" if recent > avg_vol * 1.2 else "decreasing" if recent < avg_vol * 0.8 else "neutral",
         "volume_spike": recent > avg_vol * 2
-}
+    }
 
 def find_support_resistance(candles: List[Dict], lookback: int = 20) -> Tuple[List[float], List[float]]:
     """Find support and resistance levels from recent pivots."""
