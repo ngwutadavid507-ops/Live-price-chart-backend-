@@ -200,33 +200,41 @@ def calculate_rsi(prices: List[float], period: int = 14) -> List[float]:
     return rsi
 
 def calculate_atr(candles: List[Dict], period: int = 14) -> List[float]:
-    """Calculate Average True Range for volatility."""
-    if len(candles) < 2:
-        return [0.0]
-    
-    tr_values = []
+    """
+    True ATR using Wilder's smoothing method.
+    Fully replaces previous implementation.
+    """
+
+    if len(candles) < period + 1:
+        return [0.0] * len(candles)
+
+    true_ranges = []
+
     for i in range(1, len(candles)):
         high = candles[i]["high"]
         low = candles[i]["low"]
-        prev_close = candles[i-1]["close"]
-        
-        tr1 = high - low
-        tr2 = abs(high - prev_close)
-        tr3 = abs(low - prev_close)
-        
-        tr_values.append(max(tr1, tr2, tr3))
-    
-    if len(tr_values) < period:
-        return [sum(tr_values) / len(tr_values)] * len(tr_values) if tr_values else [0.0]
-    
-    atr = [sum(tr_values[:period]) / period]
-    
-    for i in range(period, len(tr_values)):
-        atr.append((atr[-1] * (period - 1) + tr_values[i]) / period)
-    
-    # Pad beginning
-    first_atr = atr[0]
-    return [first_atr] * period + atr[1:]
+        prev_close = candles[i - 1]["close"]
+
+        tr = max(
+            high - low,
+            abs(high - prev_close),
+            abs(low - prev_close)
+        )
+        true_ranges.append(tr)
+
+    atr = []
+
+    # initial ATR = SMA of first period TRs
+    initial_atr = sum(true_ranges[:period]) / period
+    atr.append(initial_atr)
+
+    # Wilder smoothing
+    for i in range(period, len(true_ranges)):
+        next_atr = ((atr[-1] * (period - 1)) + true_ranges[i]) / period
+        atr.append(next_atr)
+
+    # align output length with candles
+    return [atr[0]] * period + atr
 
 def calculate_volume_profile(candles: List[Dict]) -> Dict:
     if len(candles) < 5:
@@ -356,54 +364,80 @@ def calculate_momentum(candles: List[Dict]) -> Dict:
         "acceleration": round(acceleration, 4)
     }
 
-def calculate_market_score(trend: Dict, momentum: Dict, volatility: float, volume: Dict) -> Dict:
-    """Calculate overall market strength score (0-100)."""
-    score = 50  # Neutral base
-    
-    # Trend contribution (0-30)
+def calculate_market_quality(trend, momentum, volatility, volume):
+    """
+    Phase 2 Core Engine: Market Quality (NOT a single score)
+    """
+
+    # ========== TREND QUALITY ==========
+    trend_quality = 0
+
     if trend["direction"] == "bullish":
-        score += min(30, trend["strength"] * 0.3)
+        trend_quality += 40
     elif trend["direction"] == "bearish":
-        score -= min(30, trend["strength"] * 0.3)
-    
-    # Momentum contribution (0-25)
+        trend_quality += 40
+    else:
+        trend_quality += 20
+
+    trend_quality += min(30, trend["strength"] * 0.3)
+
+
+    # ========== MOMENTUM QUALITY ==========
     rsi = momentum["rsi"]
-    if rsi > 50:
-        score += min(25, (rsi - 50) * 0.5)
+
+    if 45 <= rsi <= 65:
+        momentum_quality = 40  # healthy zone
+    elif 30 <= rsi <= 70:
+        momentum_quality = 25
     else:
-        score -= min(25, (50 - rsi) * 0.5)
-    
-    # Volume contribution (0-20)
-    if volume["volume_trend"] == "increasing":
-        score += 10
+        momentum_quality = 10  # extreme zone
+
+    momentum_quality += min(30, abs(momentum["acceleration"]) * 5)
+
+
+    # ========== VOLATILITY QUALITY ==========
+    atr_pct = volatility["atr_percent"]
+
+    if 1.0 <= atr_pct <= 4.0:
+        volatility_quality = 40  # ideal trading range
+    elif 0.5 <= atr_pct < 1.0 or 4.0 < atr_pct <= 6.0:
+        volatility_quality = 25
+    else:
+        volatility_quality = 10  # too low or too chaotic
+
+
+    # ========== VOLUME QUALITY ==========
     if volume["volume_spike"]:
-        score += 10
-    
-    # Volatility penalty (0-25)
-    if volatility > 5:  # High volatility
-        score -= 10
-    elif volatility < 1:  # Too low, no movement
-        score -= 5
-    
-    # Clamp to 0-100
-    score = max(0, min(100, score))
-    
-    # Overall state
-    if score >= 70:
-        state = "strong"
-    elif score >= 55:
-        state = "bullish"
-    elif score >= 45:
-        state = "neutral"
-    elif score >= 30:
-        state = "bearish"
+        volume_quality = 40
+    elif volume["volume_trend"] == "increasing":
+        volume_quality = 30
     else:
-        state = "weak"
-    
+        volume_quality = 15
+
+
+    # ========== FINAL MARKET QUALITY ==========
+    total = trend_quality + momentum_quality + volatility_quality + volume_quality
+    normalized = round(min(100, total / 1.6), 2)
+
+    if normalized >= 75:
+        state = "high_quality"
+    elif normalized >= 55:
+        state = "medium_quality"
+    elif normalized >= 40:
+        state = "low_quality"
+    else:
+        state = "unstable"
+
     return {
-        "score": round(score, 2),
-        "state": state
-                       }
+        "score": normalized,
+        "state": state,
+        "components": {
+            "trend_quality": round(trend_quality, 2),
+            "momentum_quality": round(momentum_quality, 2),
+            "volatility_quality": round(volatility_quality, 2),
+            "volume_quality": round(volume_quality, 2),
+        }
+        }
 
 # ========== ANALYSIS ENGINE ==========
 async def analyze_symbol(symbol: str) -> Dict:
