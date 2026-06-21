@@ -274,6 +274,39 @@ def find_support_resistance(candles: List[Dict], lookback: int = 20) -> Tuple[Li
         # Local low = support
         if all(lows[i] <= lows[j] for j in range(i - lookback, i + lookback + 1) if j != i):
             support_levels.append(lows[i])
+
+def calculate_trend_strength(candles: List[Dict]) -> Dict:
+    closes = [c["close"] for c in candles]
+
+    ema9 = calculate_ema(closes, 9)
+    ema21 = calculate_ema(closes, 21)
+    ema50 = calculate_ema(closes, 50)
+
+    bullish_alignment = ema9[-1] > ema21[-1] > ema50[-1]
+    bearish_alignment = ema9[-1] < ema21[-1] < ema50[-1]
+
+    # strength calculation (IMPORTANT for Phase 2)
+    spread = abs(ema9[-1] - ema50[-1]) / ema50[-1] * 100
+    strength = min(100, spread * 8)
+
+    if bullish_alignment:
+        direction = "strong_bullish"
+    elif bearish_alignment:
+        direction = "strong_bearish"
+    elif ema9[-1] > ema21[-1]:
+        direction = "weak_bullish"
+    elif ema9[-1] < ema21[-1]:
+        direction = "weak_bearish"
+    else:
+        direction = "neutral"
+
+    return {
+        "direction": direction,
+        "strength": round(strength, 2),
+        "ema9": ema9[-1],
+        "ema21": ema21[-1],
+        "ema50": ema50[-1]
+    }
     
     # Cluster nearby levels (within 2%)
     def cluster_levels(levels, threshold=0.02):
