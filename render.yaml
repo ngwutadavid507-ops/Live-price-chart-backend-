@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: live-price-chart-backend
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: BYBIT_API_KEY
+        sync: false
+      - key: BYBIT_API_SECRET
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+    healthCheckPath: /health
