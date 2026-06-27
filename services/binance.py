@@ -21,16 +21,37 @@ HEADERS = {
 }
 
 
-async def _get(path: str, params: dict = {}) -> dict | list | None:
-    """Try each Binance base URL until one works."""
+async def _get(
+    path: str,
+    params: dict | None = None,
+):
     for base in BASES:
         try:
-            async with httpx.AsyncClient(timeout=TIMEOUT, headers=HEADERS) as client:
-                r = await client.get(f"{base}{path}", params=params)
+            async with httpx.AsyncClient(
+                timeout=TIMEOUT,
+                headers=HEADERS,
+                follow_redirects=True,
+            ) as client:
+
+                r = await client.get(
+                    f"{base}{path}",
+                    params=params or {},
+                )
+
                 if r.status_code == 200:
                     return r.json()
-        except Exception:
-            continue
+
+                print(
+                    f"BINANCE {base} "
+                    f"{r.status_code}: "
+                    f"{r.text[:200]}"
+                )
+
+        except Exception as e:
+            print(
+                f"BINANCE ERROR {base}: {e}"
+            )
+
     return None
 
 
