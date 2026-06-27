@@ -6,6 +6,7 @@ from fastapi import APIRouter, Query, WebSocket
 from cache.market_cache import market_cache
 from cache.analysis_cache import analysis_cache
 from services.bybit import get_klines as bybit_klines
+from services.binance import get_klines as binance_klines
 from services.bybit import get_tickers
 from utils.validators import validate_symbol, validate_timeframe, validate_limit
 from models.market import MarketSummary
@@ -82,41 +83,75 @@ async def trending(limit: int = Query(20, ge=1, le=50)):
 
 @router.get("/candles/{symbol}")
 async def candles(
-    symbol:   str,
+    symbol: str,
     interval: str = Query("1h"),
-    limit:    int  = Query(100, ge=10, le=500),
+    limit: int = Query(100, ge=10, le=500),
 ):
-    sym            = validate_symbol(symbol)
-    tf             = validate_timeframe(interval)
-    lim            = validate_limit(limit)
+    sym = validate_symbol(symbol)
+    tf = validate_timeframe(interval)
+    lim = validate_limit(limit)
+
     bybit_interval = INTERVAL_MAP.get(tf, "60")
 
-    # Debug: test Bybit directly
-    debug_info = {}
-    try:
-        url    = "https://api.bybit.com/v5/market/kline"
-        params = {
-            "category": "linear",
-            "symbol":   sym,
-            "interval": bybit_interval,
-            "limit":    5,
-        }
-        async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.get(url, params=params)
-            debug_info["status_code"] = r.status_code
-            debug_info["raw"]         = r.json()
-    except Exception as e:
-        debug_info["error"] = str(e)
+    # Convert timeframe for Binance
+    binance_map = {
+        "1m": "1m",
+        "5m": "5m",
+        "15m": "15m",
+        "30m": "30m",
+        "1h": "1h",
+        "4h": "4h",
+        "1d": "1d",
+        "1w": "1w",
+    }
 
-    bars = await bybit_klines(sym, interval=bybit_interval, limit=lim)
+    binance_interval = binance_map.get(tf, "1h")
+
+    try:
+        bars = await bybit_klines(
+            sym,
+            interval=bybit_interval,
+            limit=lim,
+        )
+
+        if bars:
+            return {
+                "symbol": sym,
+                "interval": tf,
+                "source": "bybit",
+                "count": len(bars),
+                "candles": bars,
+            }
+
+    except Exception as e:
+        print(f"Bybit failed: {e}")
+
+    try:
+        bars = await binance_klines(
+            sym,
+            interval=binance_interval,
+            limit=lim,
+        )
+
+        return {
+            "symbol": sym,
+            "interval": tf,
+            "source": "binance",
+            "count": len(bars),
+            "candles": bars,
+        }
+
+    except Exception as e:
+        print(f"Binance failed: {e}")
 
     return {
-        "symbol":     sym,
-        "interval":   tf,
-        "count":      len(bars),
-        "candles":    bars,
-        "debug":      debug_info,
-    }
+        "symbol": sym,
+        "interval": tf,
+        "source": None,
+        "count": 0,
+        "candles": [],
+        "error": "Both Bybit and Binance failed",
+        }
 
 
 @router.websocket("/ws/ticker")
