@@ -1,13 +1,13 @@
 """
-Analysis Cache — stores computed analysis results per symbol.
-TTL: 60 seconds. Only analyses hot symbols proactively.
+Analysis Cache — uses Bybit for candles.
+Bybit works perfectly on Render free tier.
 """
 
 import asyncio
 import time
 from config import cfg
 from cache.market_cache import market_cache
-from services.binance import get_klines
+from services.bybit import get_klines
 from engines import (
     analyse_trend, analyse_momentum, analyse_volatility,
     analyse_volume, generate_signal, compute_market_score,
@@ -65,7 +65,7 @@ class AnalysisCache:
 
     async def _analyse_symbol(self, symbol: str) -> AnalysisResult | None:
         try:
-            candles = await get_klines(symbol, interval="1h", limit=100)
+            candles = await get_klines(symbol, interval="60", limit=100)
             if len(candles) < 20:
                 return None
 
@@ -74,8 +74,11 @@ class AnalysisCache:
             momentum   = analyse_momentum(closes)
             volatility = analyse_volatility(candles)
             volume     = analyse_volume(candles)
-            signal     = generate_signal(symbol, closes, candles, trend, momentum, volatility, volume)
-            score      = compute_market_score(trend, momentum, volatility, volume)
+            signal     = generate_signal(
+                symbol, closes, candles,
+                trend, momentum, volatility, volume
+            )
+            score = compute_market_score(trend, momentum, volatility, volume)
 
             result = AnalysisResult(
                 symbol=symbol,
