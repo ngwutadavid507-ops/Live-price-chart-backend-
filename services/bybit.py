@@ -27,11 +27,8 @@ async def _get(path: str, params: dict | None = None):
             )
 
             if r.status_code != 200:
-                print(
-                    f"BYBIT ERROR {r.status_code}: "
-                    f"{r.text[:500]}"
-                )
-                return None
+    print(f"Bybit error: {r.status_code}")
+    return []
 
             return r.json()
 
