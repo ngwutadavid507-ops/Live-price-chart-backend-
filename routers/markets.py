@@ -1,17 +1,23 @@
 """
-/markets — prices, ticker, market summary, candles.
-Powers: dashboard.js, markets.js, ticker feed.
+/markets — debug version to identify candle source issue.
 """
 
 from fastapi import APIRouter, Query, WebSocket
 from cache.market_cache import market_cache
 from cache.analysis_cache import analysis_cache
-from services.binance import get_klines
+from services.bybit import get_klines as bybit_klines
+from services.bybit import get_tickers
 from utils.validators import validate_symbol, validate_timeframe, validate_limit
 from models.market import MarketSummary
 from websocket.ticker_ws import ticker_endpoint
+import httpx
 
 router = APIRouter()
+
+INTERVAL_MAP = {
+    "1m": "1", "5m": "5", "15m": "15", "30m": "30",
+    "1h": "60", "4h": "240", "1d": "D", "1w": "W",
+}
 
 
 @router.get("/summary")
@@ -28,12 +34,10 @@ async def market_summary():
             "strongest_bearish": [],
             "total_tracked":     len(assets),
         }
-
     bullish   = [a for a in analyses if a.signal.direction == "buy"]
     bearish   = [a for a in analyses if a.signal.direction == "sell"]
     neutral   = [a for a in analyses if a.signal.direction == "neutral"]
     avg_score = sum(a.market_score for a in analyses) / len(analyses) if analyses else 50.0
-
     return MarketSummary(
         bullish_count=len(bullish),
         bearish_count=len(bearish),
@@ -48,7 +52,7 @@ async def market_summary():
 @router.get("/pairs")
 async def all_pairs(
     limit:  int = Query(100, ge=1, le=2000),
-    search: str = Query("", description="Filter by symbol prefix"),
+    search: str = Query(""),
 ):
     assets = market_cache.all()
     if search:
@@ -80,13 +84,39 @@ async def trending(limit: int = Query(20, ge=1, le=50)):
 async def candles(
     symbol:   str,
     interval: str = Query("1h"),
-    limit:    int = Query(100, ge=10, le=500),
+    limit:    int  = Query(100, ge=10, le=500),
 ):
-    sym  = validate_symbol(symbol)
-    tf   = validate_timeframe(interval)
-    lim  = validate_limit(limit)
-    bars = await get_klines(sym, interval=tf, limit=lim)
-    return {"symbol": sym, "interval": tf, "count": len(bars), "candles": bars}
+    sym            = validate_symbol(symbol)
+    tf             = validate_timeframe(interval)
+    lim            = validate_limit(limit)
+    bybit_interval = INTERVAL_MAP.get(tf, "60")
+
+    # Debug: test Bybit directly
+    debug_info = {}
+    try:
+        url    = "https://api.bybit.com/v5/market/kline"
+        params = {
+            "category": "linear",
+            "symbol":   sym,
+            "interval": bybit_interval,
+            "limit":    5,
+        }
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(url, params=params)
+            debug_info["status_code"] = r.status_code
+            debug_info["raw"]         = r.json()
+    except Exception as e:
+        debug_info["error"] = str(e)
+
+    bars = await bybit_klines(sym, interval=bybit_interval, limit=lim)
+
+    return {
+        "symbol":     sym,
+        "interval":   tf,
+        "count":      len(bars),
+        "candles":    bars,
+        "debug":      debug_info,
+    }
 
 
 @router.websocket("/ws/ticker")
