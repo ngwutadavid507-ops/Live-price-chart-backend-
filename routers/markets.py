@@ -1,24 +1,15 @@
 """
-/markets — debug version to identify candle source issue.
+/markets — CoinGecko candles + WebSocket live prices.
 """
 
 from fastapi import APIRouter, Query, WebSocket
 from cache.market_cache import market_cache
-from cache.analysis_cache import analysis_cache
-from services.bybit import get_klines as bybit_klines
-from services.binance import get_klines as binance_klines
-from services.bybit import get_tickers
+from cache.analysis_cache import analysis_cache, _get_candles
 from utils.validators import validate_symbol, validate_timeframe, validate_limit
 from models.market import MarketSummary
 from websocket.ticker_ws import ticker_endpoint
-import httpx
 
 router = APIRouter()
-
-INTERVAL_MAP = {
-    "1m": "1", "5m": "5", "15m": "15", "30m": "30",
-    "1h": "60", "4h": "240", "1d": "D", "1w": "W",
-}
 
 
 @router.get("/summary")
@@ -38,7 +29,7 @@ async def market_summary():
     bullish   = [a for a in analyses if a.signal.direction == "buy"]
     bearish   = [a for a in analyses if a.signal.direction == "sell"]
     neutral   = [a for a in analyses if a.signal.direction == "neutral"]
-    avg_score = sum(a.market_score for a in analyses) / len(analyses) if analyses else 50.0
+    avg_score = sum(a.market_score for a in analyses) / len(analyses)
     return MarketSummary(
         bullish_count=len(bullish),
         bearish_count=len(bearish),
@@ -77,81 +68,26 @@ async def trending(limit: int = Query(20, ge=1, le=50)):
              "direction": a.signal.direction}
             for a in ranked
         ]}
-    hot = market_cache.hot()[:limit]
-    return {"ranked_by": "volume", "assets": hot}
+    return {"ranked_by": "volume", "assets": market_cache.hot()[:limit]}
 
 
 @router.get("/candles/{symbol}")
 async def candles(
-    symbol: str,
+    symbol:   str,
     interval: str = Query("1h"),
-    limit: int = Query(100, ge=10, le=500),
+    limit:    int  = Query(100, ge=10, le=500),
 ):
-    sym = validate_symbol(symbol)
-    tf = validate_timeframe(interval)
-    lim = validate_limit(limit)
-
-    bybit_interval = INTERVAL_MAP.get(tf, "60")
-
-    # Convert timeframe for Binance
-    binance_map = {
-        "1m": "1m",
-        "5m": "5m",
-        "15m": "15m",
-        "30m": "30m",
-        "1h": "1h",
-        "4h": "4h",
-        "1d": "1d",
-        "1w": "1w",
-    }
-
-    binance_interval = binance_map.get(tf, "1h")
-
-    try:
-        bars = await bybit_klines(
-            sym,
-            interval=bybit_interval,
-            limit=lim,
-        )
-
-        if bars:
-            return {
-                "symbol": sym,
-                "interval": tf,
-                "source": "bybit",
-                "count": len(bars),
-                "candles": bars,
-            }
-
-    except Exception as e:
-        print(f"Bybit failed: {e}")
-
-    try:
-        bars = await binance_klines(
-            sym,
-            interval=binance_interval,
-            limit=lim,
-        )
-
-        return {
-            "symbol": sym,
-            "interval": tf,
-            "source": "binance",
-            "count": len(bars),
-            "candles": bars,
-        }
-
-    except Exception as e:
-        print(f"Binance failed: {e}")
-
+    sym  = validate_symbol(symbol)
+    tf   = validate_timeframe(interval)
+    lim  = validate_limit(limit)
+    bars = await _get_candles(sym)
     return {
-        "symbol": sym,
+        "symbol":   sym,
         "interval": tf,
-        "source": None,
-        "count": 0,
-        "candles": [],
-        "error": "Both Bybit and Binance failed",
-        }
+        "count":    len(bars),
+        "candles":  bars[-lim:],
+        "source":   "coingecko",
+    }
 
 
 @router.websocket("/ws/ticker")
