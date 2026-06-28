@@ -1,7 +1,7 @@
 """
-Market Cache — fed by Binance + Bybit WebSockets.
-REST polling removed. WebSocket pushes prices in real time.
-Works on Render free tier (WSS not blocked).
+Market Cache — fed by Bybit + OKX + BingX WebSockets.
+CoinGecko seeds names/market caps on startup only.
+WebSocket pushes overwrite with real exchange prices instantly.
 """
 
 import asyncio
@@ -12,11 +12,9 @@ from utils.safe_float import safe_float
 
 class MarketCache:
     def __init__(self):
-        self._data:       dict[str, dict] = {}
-        self._built_at:   float           = 0.0
-        self._ready:      bool            = False
-
-    # ── Public API ────────────────────────────────────────────────────
+        self._data:     dict[str, dict] = {}
+        self._built_at: float           = 0.0
+        self._ready:    bool            = False
 
     def get(self, symbol: str) -> dict | None:
         return self._data.get(symbol.upper())
@@ -25,7 +23,6 @@ class MarketCache:
         return list(self._data.values())
 
     def hot(self) -> list[dict]:
-        """Top 20 by volume."""
         return sorted(
             self._data.values(),
             key=lambda x: x.get("volume_raw", 0),
@@ -40,15 +37,16 @@ class MarketCache:
         for v in self._data.values():
             src = v.get("source", "unknown")
             sources[src] = sources.get(src, 0) + 1
+        exchange_sources = {"bybit", "okx", "bingx"}
         return {
             "total_symbols":    len(self._data),
-            "exchange_count":   sources.get("binance", 0) + sources.get("bybit", 0),
-            "aggregator_count": sources.get("coingecko", 0) + sources.get("coinpaprika", 0),
+            "exchange_count":   sum(
+                v for k, v in sources.items() if k in exchange_sources
+            ),
+            "aggregator_count": sources.get("coingecko_seed", 0),
             "source_log":       sources,
             "age_seconds":      round(time.time() - self._built_at, 1),
         }
-
-    # ── WebSocket callback ────────────────────────────────────────────
 
     async def update_from_ws(
         self,
@@ -60,36 +58,33 @@ class MarketCache:
         low:       float,
         source:    str,
     ):
-        """Called by Binance/Bybit WebSocket on every tick."""
-        sym = symbol.upper()
+        """Called by Bybit/OKX/BingX WebSocket on every tick."""
+        sym      = symbol.upper()
         existing = self._data.get(sym, {})
 
+        # Only update price fields — keep name/market_cap/sparkline from seed
         self._data[sym] = {
             "symbol":     sym,
             "name":       existing.get("name", sym.replace("USDT", "")),
             "price":      price,
             "change24h":  change24h,
-            "volume":     fmt_compact(volume),
+            "volume":     fmt_compact(volume) if volume else "—",
             "volume_raw": volume,
-            "high":       high,
-            "low":        low,
+            "high":       high if high > 0 else existing.get("high", 0),
+            "low":        low  if low  > 0 else existing.get("low",  0),
             "market_cap": existing.get("market_cap", 0),
             "sparkline":  existing.get("sparkline", []),
             "source":     source,
-            "confidence": "high",   # WebSocket = exchange data = high confidence
+            "confidence": "high",
         }
 
         if not self._ready and len(self._data) >= 5:
             self._ready    = True
             self._built_at = time.time()
-
-    # ── Startup seed (CoinGecko REST — one time only) ─────────────────
+            print(f"Market cache READY — {len(self._data)} symbols from {source}")
 
     async def build(self):
-        """
-        Seed initial data from CoinGecko.
-        WebSocket will overwrite with real exchange prices immediately.
-        """
+        """Seed from CoinGecko once — names, market caps, sparklines."""
         try:
             import httpx
             url    = "https://api.coingecko.com/api/v3/coins/markets"
@@ -105,8 +100,8 @@ class MarketCache:
                 if r.status_code == 200:
                     raw = r.json()
                     for c in raw:
-                        sym      = c["symbol"].upper() + "USDT"
-                        vol_raw  = safe_float(c.get("total_volume", 0))
+                        sym       = c["symbol"].upper() + "USDT"
+                        vol_raw   = safe_float(c.get("total_volume", 0))
                         sparkline = c.get("sparkline_in_7d", {}).get("price", [])
                         self._data[sym] = {
                             "symbol":     sym,
@@ -124,13 +119,16 @@ class MarketCache:
                         }
                     self._ready    = True
                     self._built_at = time.time()
-                    print(f"Market cache seeded with {len(self._data)} assets")
+                    print(f"Seeded {len(self._data)} assets from CoinGecko")
+                else:
+                    print(f"CoinGecko seed failed: {r.status_code}")
+                    self._ready = True
         except Exception as e:
-            print(f"Seed failed: {e} — waiting for WebSocket data")
-            self._ready = True   # Don't block startup
+            print(f"CoinGecko seed error: {e}")
+            self._ready = True
 
     async def auto_refresh(self):
-        """Not needed — WebSocket keeps data fresh. No-op."""
+        """No-op — WebSockets keep data fresh."""
         pass
 
 
