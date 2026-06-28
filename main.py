@@ -1,6 +1,7 @@
 """
 Phoenix Terminal Backend — V8
-WebSocket-powered. Binance + Bybit WSS feed market cache in real time.
+Bybit + OKX + BingX WebSockets power the market cache.
+Binance removed (geo-blocked in Nigeria).
 """
 
 import asyncio
@@ -17,31 +18,37 @@ from routers import watchlist, news, ai, journal, protools, settings
 from cache.market_cache import market_cache
 from cache.analysis_cache import analysis_cache
 from websocket.manager import ws_manager
-from services.binance_ws import start_binance_ws
 from services.bybit_ws import start_bybit_ws
+from services.okx_ws import start_okx_ws
+from services.bingx_ws import start_bingx_ws
 
 limiter = Limiter(key_func=get_remote_address)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Step 1: Seed cache with CoinGecko (one time)
+    # Step 1: Seed cache with CoinGecko (names, market caps, sparklines)
     await market_cache.build()
 
-    # Step 2: Start Binance WebSocket (live prices)
-    asyncio.create_task(
-        start_binance_ws(market_cache.update_from_ws)
-    )
-
-    # Step 3: Start Bybit WebSocket (live futures prices)
+    # Step 2: Start Bybit WebSocket
     asyncio.create_task(
         start_bybit_ws(market_cache.update_from_ws)
     )
 
-    # Step 4: Build analysis cache after short delay
-    # (let WebSocket populate prices first)
+    # Step 3: Start OKX WebSocket
+    asyncio.create_task(
+        start_okx_ws(market_cache.update_from_ws)
+    )
+
+    # Step 4: Start BingX WebSocket
+    asyncio.create_task(
+        start_bingx_ws(market_cache.update_from_ws)
+    )
+
+    # Step 5: Build analysis cache after 20s
+    # (let WebSockets populate prices first)
     async def delayed_analysis():
-        await asyncio.sleep(15)
+        await asyncio.sleep(20)
         await analysis_cache.build()
         asyncio.create_task(analysis_cache.auto_refresh())
 
@@ -55,7 +62,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Phoenix Terminal API",
     version="8.0.0",
-    description="Real-time crypto intelligence backend for Phoenix AI Terminal",
+    description="Real-time crypto intelligence — Bybit + OKX + BingX",
     lifespan=lifespan,
 )
 
