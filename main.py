@@ -1,7 +1,6 @@
 """
 Phoenix Terminal Backend — V8
-Entry point. Mounts all routers, registers startup/shutdown hooks,
-configures CORS and rate limiting.
+WebSocket-powered. Binance + Bybit WSS feed market cache in real time.
 """
 
 import asyncio
@@ -18,17 +17,38 @@ from routers import watchlist, news, ai, journal, protools, settings
 from cache.market_cache import market_cache
 from cache.analysis_cache import analysis_cache
 from websocket.manager import ws_manager
+from services.binance_ws import start_binance_ws
+from services.bybit_ws import start_bybit_ws
 
 limiter = Limiter(key_func=get_remote_address)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Step 1: Seed cache with CoinGecko (one time)
     await market_cache.build()
-    await analysis_cache.build()
-    asyncio.create_task(market_cache.auto_refresh())
-    asyncio.create_task(analysis_cache.auto_refresh())
+
+    # Step 2: Start Binance WebSocket (live prices)
+    asyncio.create_task(
+        start_binance_ws(market_cache.update_from_ws)
+    )
+
+    # Step 3: Start Bybit WebSocket (live futures prices)
+    asyncio.create_task(
+        start_bybit_ws(market_cache.update_from_ws)
+    )
+
+    # Step 4: Build analysis cache after short delay
+    # (let WebSocket populate prices first)
+    async def delayed_analysis():
+        await asyncio.sleep(15)
+        await analysis_cache.build()
+        asyncio.create_task(analysis_cache.auto_refresh())
+
+    asyncio.create_task(delayed_analysis())
+
     yield
+
     await ws_manager.shutdown()
 
 
@@ -72,8 +92,8 @@ async def root():
     mc = market_cache.meta()
     ac = analysis_cache.meta()
     return {
-        "status": "online",
-        "version": "8.0.0",
+        "status":               "online",
+        "version":              "8.0.0",
         "total_symbols":        mc["total_symbols"],
         "exchange_price_count": mc["exchange_count"],
         "aggregator_count":     mc["aggregator_count"],
@@ -90,4 +110,4 @@ async def health():
         "websocket_clients": ws_manager.client_count(),
         "cache_ready":       market_cache.is_ready(),
         "analysis_ready":    analysis_cache.is_ready(),
-}
+    }
